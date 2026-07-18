@@ -71,7 +71,7 @@ export function ClientDetails({ client, onEdit, onDeleted, className }: {
       <div className="flex h-[72px] shrink-0 items-center justify-between border-b border-border/80 px-5">
         <div><h2 className="font-heading text-xl font-semibold leading-tight">Ficha del cliente</h2><p className="mt-0.5 text-[13px] text-muted-foreground">Datos e historial</p></div>
         <DropdownMenu>
-          <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm"><Ellipsis /><span className="sr-only">Acciones</span></Button></DropdownMenuTrigger>
+          <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm"><Ellipsis /><span className="sr-only">Acciones del cliente</span></Button></DropdownMenuTrigger>
           <DropdownMenuContent align="end">
             <DropdownMenuItem onSelect={onEdit}><Pencil />Editar ficha</DropdownMenuItem>
             <DropdownMenuSeparator />
@@ -94,17 +94,17 @@ export function ClientDetails({ client, onEdit, onDeleted, className }: {
 
           <Separator className="my-6" />
           <div className="flex items-center justify-between"><div><h3 className="font-heading text-lg font-semibold leading-tight">Historia de contactos</h3><p className="mt-0.5 text-[13px] text-muted-foreground">{client.history.length} registros</p></div><Clock3 className="size-4 text-muted-foreground" /></div>
-          <form ref={formRef} action={addHistory} className="mt-4 rounded-xl border border-border bg-muted/35 p-3.5 shadow-[inset_0_1px_0_oklch(1_0_0/0.55)]">
+          <form ref={formRef} action={addHistory} className="mt-4 rounded-xl border border-border bg-muted/35 p-3.5 shadow-xs">
             <FieldGroup className="gap-3">
               <Field><FieldLabel htmlFor="contactDate" className="text-[13px] font-semibold">Fecha y hora</FieldLabel><DateTimePicker id="contactDate" name="contactDate" defaultValue={currentDateTime} /></Field>
               <Field><FieldLabel htmlFor="description" className="text-[13px] font-semibold">Descripción</FieldLabel><Textarea id="description" name="description" placeholder="Llamada, reunión, seguimiento…" className="min-h-24 resize-none bg-card text-sm" /></Field>
               <FieldError>{historyError}</FieldError>
-              <Button size="sm" className={cn("h-9 text-[13px] shadow-xs", historySaved && "bg-[var(--wa-green)] disabled:opacity-100")} type="submit" disabled={pending || historySaved}>{pending ? <LoaderCircle className="animate-spin" /> : historySaved ? <Check className="crm-check-in" /> : <Plus />}{historySaved ? "Registrado" : "Registrar contacto"}</Button>
+              <Button size="sm" className={cn("h-9 text-[13px] shadow-xs", historySaved && "bg-wa-green disabled:opacity-100")} type="submit" disabled={pending || historySaved}>{pending ? <LoaderCircle className="animate-spin" /> : historySaved ? <Check className="crm-check-in" /> : <Plus />}{historySaved ? "Registrado" : "Registrar contacto"}</Button>
             </FieldGroup>
           </form>
           <div className="relative mt-6 space-y-6 before:absolute before:bottom-3 before:left-[5px] before:top-2 before:w-px before:bg-border">
             {client.history.length === 0 ? (
-              <p className="pl-6 text-sm leading-relaxed text-muted-foreground">Todavía no hay contactos registrados. Usá el formulario para guardar una llamada, reunión o seguimiento.</p>
+              <p className="pl-6 text-sm leading-relaxed text-muted-foreground">Todavía no hay seguimientos. Registrá una llamada, reunión o mensaje para empezar.</p>
             ) : client.history.map((item, index) => (
               <div key={item.id} className={cn("group relative pl-6", index === 0 && "crm-reveal")}>
                 <span className="absolute left-0 top-1.5 size-[11px] rounded-full border-2 border-card bg-primary" />
@@ -121,7 +121,7 @@ export function ClientDetails({ client, onEdit, onDeleted, className }: {
       <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <AlertDialogContent>
           <AlertDialogHeader><AlertDialogTitle>¿Eliminar a {client.firstName}?</AlertDialogTitle><AlertDialogDescription>Se eliminarán también su historial y todos los mensajes guardados. Esta acción no se puede deshacer.</AlertDialogDescription></AlertDialogHeader>
-          <AlertDialogFooter><AlertDialogCancel>Cancelar</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={async () => { await deleteClientAction(client.id); toast.success("Cliente eliminado"); onDeleted() }}>Eliminar definitivamente</AlertDialogAction></AlertDialogFooter>
+          <AlertDialogFooter><AlertDialogCancel>Cancelar</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={async () => { await deleteClientAction(client.id); toast.success("Cliente eliminado", { description: "La ficha y su historial fueron eliminados." }); onDeleted() }}>Eliminar cliente</AlertDialogAction></AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
     </aside>

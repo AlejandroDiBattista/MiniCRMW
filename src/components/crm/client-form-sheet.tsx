@@ -77,7 +77,7 @@ export function ClientFormSheet({ client, open: controlledOpen, onOpenChange, on
             <Field>
               <FieldLabel htmlFor="phone">Teléfono de WhatsApp</FieldLabel>
               <Input id="phone" name="phone" defaultValue={client?.phone} placeholder="+54 9 381 555 0123" inputMode="tel" required />
-              <FieldDescription>Incluí código de país y área. Se usa para vincular la conversación.</FieldDescription>
+              <FieldDescription>Usá el número con código de país y área para vincular este chat.</FieldDescription>
             </Field>
             <Field>
               <FieldLabel htmlFor="email">Email</FieldLabel>

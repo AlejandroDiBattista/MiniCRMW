@@ -40,7 +40,7 @@ export function ContactList({ clients, selectedId, onSelect, className }: {
                 value={`${fullName(client)} ${client.phone} ${client.dni}`}
                 onSelect={() => onSelect(client.id)}
                 data-selected={client.id === selectedId}
-                className="mb-1 min-h-[74px] cursor-pointer gap-3 rounded-xl px-3 py-2.5 transition-[background-color,box-shadow,transform] duration-200 ease-[cubic-bezier(0.25,1,0.5,1)] hover:translate-x-0.5 hover:bg-muted/70 active:translate-x-0 data-[selected=true]:bg-accent data-[selected=true]:shadow-[inset_0_0_0_1px_oklch(0.35_0.075_157/0.10)]"
+                className="mb-1 min-h-[74px] cursor-pointer gap-3 rounded-xl px-3 py-2.5 transition-[background-color,box-shadow,transform] duration-200 ease-[cubic-bezier(0.25,1,0.5,1)] hover:translate-x-0.5 hover:bg-muted/70 active:translate-x-0 data-[selected=true]:bg-accent data-[selected=true]:ring-1 data-[selected=true]:ring-primary/10"
               >
                 <Avatar className="size-11 border border-border/80 shadow-xs">
                   <AvatarImage src={avatarUrl(client)} alt={`Foto de ${fullName(client)}`} className="object-cover" />
@@ -52,7 +52,7 @@ export function ContactList({ clients, selectedId, onSelect, className }: {
                     {client.lastMessage ? <span className="shrink-0 text-[11px] font-medium tabular-nums text-muted-foreground">{timeFormatter.format(new Date(client.lastMessage.timestamp))}</span> : null}
                   </div>
                   <p className="mt-1 truncate text-[13px] leading-snug text-muted-foreground">
-                    {client.lastMessage?.direction === "outgoing" ? <CheckCheck className={cn("mr-1 inline size-3.5 stroke-[2.5]", client.lastMessage.readAt ? "text-sky-500" : "text-muted-foreground/70")} /> : null}
+                    {client.lastMessage?.direction === "outgoing" ? <CheckCheck className={cn("mr-1 inline size-3.5 stroke-[2.5]", client.lastMessage.readAt ? "text-wa-read" : "text-muted-foreground/70")} /> : null}
                     {client.lastMessage?.body ?? client.phone}
                   </p>
                 </div>

@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next"
 import { DM_Sans, Geist_Mono, Newsreader } from "next/font/google"
+import { ThemeProvider } from "@/components/theme-provider"
 import { Toaster } from "@/components/ui/sonner"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import "./globals.css"
@@ -21,10 +22,12 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="es" className={`${dmSans.variable} ${geistMono.variable} ${newsreader.variable} h-full antialiased`}>
+    <html lang="es" suppressHydrationWarning className={`${dmSans.variable} ${geistMono.variable} ${newsreader.variable} h-full antialiased`}>
       <body className="h-full overflow-hidden flex flex-col">
-        <TooltipProvider delayDuration={300}>{children}</TooltipProvider>
-        <Toaster richColors position="top-right" />
+        <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
+          <TooltipProvider delayDuration={300}>{children}</TooltipProvider>
+          <Toaster richColors position="top-right" />
+        </ThemeProvider>
       </body>
     </html>
   )
