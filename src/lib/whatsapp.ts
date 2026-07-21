@@ -13,6 +13,7 @@ import makeWASocket, {
   type WAMessage,
 } from "@whiskeysockets/baileys"
 import { clientAvatarPath, ensureAvatarDirectory } from "@/lib/avatar"
+import { baileysAuthDirectory } from "@/lib/storage"
 import { ensureWhatsappClient, getClient, getClients, markClientAvatarUpdated, markMessageRead, normalizePhone, saveMessage } from "@/lib/db"
 import type { Message, WhatsappConnectionStatus } from "@/lib/types"
 
@@ -41,6 +42,7 @@ class WhatsappManager {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private shouldReconnect = true
   private profileSyncTimes = new Map<string, number>()
+  private profileSyncAttemptTimes = new Map<string, number>()
   private status: WhatsappConnectionStatus = {
     state: "disconnected",
     qrDataUrl: null,
@@ -79,13 +81,13 @@ class WhatsappManager {
   }
 
   async connectIfAuthenticated() {
-    const credentialsFile = path.join(process.cwd(), ".baileys-auth", "creds.json")
+    const credentialsFile = path.join(baileysAuthDirectory, "creds.json")
     if (fs.existsSync(credentialsFile)) await this.connect()
   }
 
   private async openSocket() {
     this.setStatus({ state: "connecting", qrDataUrl: null, error: null })
-    const authDirectory = path.join(process.cwd(), ".baileys-auth")
+    const authDirectory = baileysAuthDirectory
     fs.mkdirSync(authDirectory, { recursive: true })
     const { state, saveCreds } = await createMultiFileAuthState(authDirectory)
 
@@ -106,6 +108,7 @@ class WhatsappManager {
       }
 
       if (update.connection === "open") {
+        this.profileSyncAttemptTimes.clear()
         this.setStatus({
           state: "connected",
           qrDataUrl: null,
@@ -135,9 +138,9 @@ class WhatsappManager {
       }
     })
 
-    socket.ev.on("messages.upsert", ({ messages }) => {
+    socket.ev.on("messages.upsert", ({ messages, type }) => {
       for (const rawMessage of messages) {
-        void this.storeIncomingMessage(rawMessage)
+        void this.storeIncomingMessage(rawMessage, type === "notify")
       }
     })
 
@@ -151,7 +154,7 @@ class WhatsappManager {
     })
   }
 
-  private async storeIncomingMessage(rawMessage: WAMessage) {
+  private async storeIncomingMessage(rawMessage: WAMessage, evaluate: boolean) {
     const remoteJid = rawMessage.key.remoteJid
     const body = messageText(rawMessage).trim()
     if (!remoteJid || !body || remoteJid === "status@broadcast" || remoteJid.endsWith("@g.us")) return
@@ -176,10 +179,13 @@ class WhatsappManager {
       timestamp: new Date(seconds * 1000).toISOString(),
     })
     this.emit({ type: "message", clientId: client.id, message })
+    if (evaluate) {
+      void import("@/lib/assistant/service").then(({ scheduleAssistantEvaluation }) => scheduleAssistantEvaluation(client.id, message))
+    }
     void this.syncProfilePicture(client.id, phoneJid)
   }
 
-  async sendText(clientId: string, body: string) {
+  async sendText(clientId: string, body: string, options: { evaluate?: boolean } = {}) {
     const client = getClient(clientId)
     if (!client) throw new Error("El cliente no existe")
     if (this.status.state !== "connected" || !this.socket) throw new Error("WhatsApp no está conectado")
@@ -195,6 +201,9 @@ class WhatsappManager {
       status: "sent",
     })
     this.emit({ type: "message", clientId, message })
+    if (options.evaluate !== false) {
+      void import("@/lib/assistant/service").then(({ scheduleAssistantEvaluation }) => scheduleAssistantEvaluation(clientId, message))
+    }
     void this.syncProfilePicture(clientId, remoteJid)
     return message
   }
@@ -216,13 +225,34 @@ class WhatsappManager {
     const now = Date.now()
     const lastSync = this.profileSyncTimes.get(clientId) ?? 0
     if (now - lastSync < 6 * 60 * 60 * 1000) return false
+    const lastAttempt = this.profileSyncAttemptTimes.get(clientId) ?? 0
+    if (now - lastAttempt < 15 * 60 * 1000) return false
+    this.profileSyncAttemptTimes.set(clientId, now)
     try {
-      let pictureUrl: string | undefined
-      for (const type of ["preview", "image"] as const) {
+      const client = getClient(clientId)
+      const phoneJid = client ? `${normalizePhone(client.phone)}@s.whatsapp.net` : null
+      const candidates = [...new Set([jid, phoneJid].filter((value): value is string => Boolean(value)))]
+
+      // Los chats nuevos pueden llegar como @lid. Resolver también el JID
+      // que WhatsApp tiene asociado al número aumenta la tasa de recuperación.
+      if (phoneJid) {
         try {
-          pictureUrl = await socket.profilePictureUrl(jid, type, 10_000)
+          const resolved = (await socket.onWhatsApp(phoneJid))?.[0]
+          if (resolved?.jid && !candidates.includes(resolved.jid)) candidates.unshift(resolved.jid)
         } catch {
-          // WhatsApp puede denegar la imagen completa y permitir solo la vista previa.
+          // La resolución es opcional: seguimos intentando con ambos JID conocidos.
+        }
+      }
+
+      let pictureUrl: string | undefined
+      for (const candidate of candidates) {
+        for (const type of ["preview", "image"] as const) {
+          try {
+            pictureUrl = await socket.profilePictureUrl(candidate, type, 5_000)
+          } catch {
+            // WhatsApp puede denegar la imagen completa y permitir solo la vista previa.
+          }
+          if (pictureUrl) break
         }
         if (pictureUrl) break
       }
@@ -250,6 +280,14 @@ class WhatsappManager {
       // La privacidad del contacto o un error temporal pueden impedir obtener la foto.
       return false
     }
+  }
+
+  async refreshProfilePicture(clientId: string) {
+    const client = getClient(clientId)
+    if (!client) return false
+    const phoneJid = `${normalizePhone(client.phone)}@s.whatsapp.net`
+    const remoteJid = client.lastMessage?.remoteJid
+    return this.syncProfilePicture(clientId, remoteJid && !remoteJid.startsWith("assistant@") ? remoteJid : phoneJid)
   }
 
   disconnect() {

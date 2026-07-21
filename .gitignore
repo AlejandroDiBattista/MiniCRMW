@@ -43,3 +43,5 @@ next-env.d.ts
 # local CRM data and WhatsApp session
 /.data/
 /.baileys-auth/
+/.baileys-auth.backup
+/.playwright-mcp

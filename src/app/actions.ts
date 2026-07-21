@@ -4,11 +4,13 @@ import { revalidatePath } from "next/cache"
 import { z } from "zod"
 import {
   addContactHistory,
+  completeContactHistory,
   createClient,
   deleteClient,
   deleteContactHistory,
   normalizePhone,
   updateClient,
+  updateContactHistory,
 } from "@/lib/db"
 
 const clientSchema = z.object({
@@ -35,7 +37,7 @@ export async function createClientAction(formData: FormData) {
   try {
     const client = createClient(parsed.data)
     revalidatePath("/")
-    return { ok: true as const, clientId: client.id }
+    return { ok: true as const, clientId: client.id, resultSummary: `Cliente “${client.firstName} ${client.lastName}” creado.`.replace(/\s+”/, "”") }
   } catch (error) {
     const message = error instanceof Error && error.message.includes("UNIQUE")
       ? "Ya existe una ficha con ese teléfono."
@@ -50,7 +52,7 @@ export async function updateClientAction(id: string, formData: FormData) {
   try {
     updateClient(id, parsed.data)
     revalidatePath("/")
-    return { ok: true as const }
+    return { ok: true as const, resultSummary: "Ficha del cliente actualizada." }
   } catch {
     return { ok: false as const, error: "No pudimos actualizar la ficha. Revisá que el teléfono no esté repetido." }
   }
@@ -59,23 +61,78 @@ export async function updateClientAction(id: string, formData: FormData) {
 export async function deleteClientAction(id: string) {
   deleteClient(id)
   revalidatePath("/")
-  return { ok: true as const }
+  return { ok: true as const, resultSummary: "Cliente eliminado." }
+}
+
+function parseHistoryForm(formData: FormData) {
+  type TaskField = "title" | "description" | "dueAt" | "repeatCount" | "repeatInterval" | "repeatUnit" | "form"
+  const taskSchema = z.object({
+    title: z.string().trim().min(2, "Ingresá un título para la tarea.").max(120, "El título es demasiado largo."),
+    description: z.string().trim().max(2_000, "La descripción es demasiado larga."),
+    dueAt: z.string().refine(
+      (value) => value === "" || (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value) && !Number.isNaN(new Date(value).getTime())),
+      "La fecha y hora no es válida.",
+    ),
+    repeatCount: z.coerce.number().int().min(0, "Las repeticiones no pueden ser negativas.").max(999, "Ingresá hasta 999 repeticiones."),
+    repeatInterval: z.coerce.number().int().min(1, "El intervalo debe ser mayor a cero.").max(525_600, "El intervalo es demasiado grande."),
+    repeatUnit: z.enum(["days", "hours", "minutes"]),
+  })
+  const parsed = taskSchema.safeParse({
+    title: String(formData.get("title") ?? ""),
+    description: String(formData.get("description") ?? ""),
+    dueAt: String(formData.get("dueAt") ?? ""),
+    repeatCount: String(formData.get("repeatCount") ?? "0"),
+    repeatInterval: String(formData.get("repeatInterval") ?? "1"),
+    repeatUnit: String(formData.get("repeatUnit") ?? "days"),
+  })
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0]
+    const issueField = issue?.path[0]
+    const field: TaskField = typeof issueField === "string" && ["title", "description", "dueAt", "repeatCount", "repeatInterval", "repeatUnit"].includes(issueField)
+      ? issueField as TaskField
+      : "form"
+    return { ok: false as const, error: issue?.message ?? "Revisá los datos de la tarea.", field }
+  }
+
+  return { ok: true as const, data: { ...parsed.data, dueAt: parsed.data.dueAt || null } }
 }
 
 export async function addHistoryAction(clientId: string, formData: FormData) {
-  const description = String(formData.get("description") ?? "").trim()
-  const contactDate = String(formData.get("contactDate") ?? "")
-  const validDateTime = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(contactDate) && !Number.isNaN(new Date(contactDate).getTime())
-  if (description.length < 3 || !validDateTime) {
-    return { ok: false as const, error: "Elegí una fecha y hora, y agregá una descripción." }
+  const parsed = parseHistoryForm(formData)
+  if (!parsed.ok) return parsed
+
+  try {
+    const task = addContactHistory(clientId, parsed.data)
+    revalidatePath("/")
+    return { ok: true as const, resultSummary: `Tarea “${task.title}” creada.` }
+  } catch {
+    return { ok: false as const, error: "No pudimos guardar la tarea. Intentá nuevamente.", field: "form" as const }
   }
-  addContactHistory(clientId, contactDate, description)
+}
+
+export async function updateHistoryAction(id: string, formData: FormData) {
+  const parsed = parseHistoryForm(formData)
+  if (!parsed.ok) return parsed
+
+  try {
+    const task = updateContactHistory(id, parsed.data)
+    if (!task) return { ok: false as const, error: "La tarea ya no está disponible.", field: "form" as const }
+    revalidatePath("/")
+    return { ok: true as const, resultSummary: `Tarea “${task.title}” actualizada.` }
+  } catch {
+    return { ok: false as const, error: "No pudimos actualizar la tarea. Intentá nuevamente.", field: "form" as const }
+  }
+}
+
+export async function completeHistoryAction(id: string) {
+  const result = completeContactHistory(id)
+  if (!result) return { ok: false as const, error: "La tarea ya fue completada o no existe." }
   revalidatePath("/")
-  return { ok: true as const }
+  return { ok: true as const, repeated: Boolean(result.nextTask), resultSummary: `Tarea “${result.completed.title}” completada.` }
 }
 
 export async function deleteHistoryAction(id: string) {
-  deleteContactHistory(id)
+  const deleted = deleteContactHistory(id)
   revalidatePath("/")
-  return { ok: true as const }
+  return { ok: true as const, resultSummary: deleted ? "Tarea eliminada." : "La tarea ya no estaba disponible." }
 }

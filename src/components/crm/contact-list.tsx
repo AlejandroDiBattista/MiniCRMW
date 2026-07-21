@@ -1,19 +1,33 @@
 "use client"
 
-import { CheckCheck, UsersRound } from "lucide-react"
+import { useEffect } from "react"
+import { Bot, CheckCheck, Sparkles, UsersRound } from "lucide-react"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
 import { cn } from "@/lib/utils"
 import type { Client } from "@/lib/types"
 import { avatarUrl, fullName, initials, timeFormatter } from "./format"
 
-export function ContactList({ clients, selectedId, onSelect, className }: {
+export function ContactList({ clients, selectedId, onSelect, onSelectAssistant, assistantSelected, className }: {
   clients: Client[]
   selectedId: string
   onSelect: (id: string) => void
+  onSelectAssistant: () => void
+  assistantSelected: boolean
   className?: string
 }) {
+  useEffect(() => {
+    const missingAvatars = clients.filter((client) => !client.avatarUpdatedAt)
+    if (missingAvatars.length === 0) return
+    const controller = new AbortController()
+    for (const client of missingAvatars) {
+      void fetch(`/api/clients/${client.id}/avatar?sync=1`, { signal: controller.signal }).catch(() => undefined)
+    }
+    return () => controller.abort()
+  }, [clients])
+
   return (
     <aside className={cn("h-full min-h-0 flex flex-col overflow-hidden border-r border-border/70 bg-card", className)}>
       <div className="flex h-[72px] shrink-0 items-center justify-between border-b border-border/80 px-5">
@@ -25,6 +39,27 @@ export function ContactList({ clients, selectedId, onSelect, className }: {
       </div>
       <Command className="min-h-0 flex-1 rounded-none bg-transparent p-0 [&>[data-slot=command-input-wrapper]]:p-2 [&>[data-slot=command-input-wrapper]]:pb-1" shouldFilter>
         <CommandInput placeholder="Buscar nombre, DNI o teléfono…" className="h-10 text-[15px] placeholder:text-muted-foreground/80" />
+        <div className="mx-2 mt-1 mb-2 border-b border-border/70 pb-2">
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={onSelectAssistant}
+            aria-pressed={assistantSelected}
+            className={cn(
+              "group h-auto min-h-[68px] w-full justify-start gap-3 rounded-xl border border-assistant/20 bg-assistant-soft/45 px-3 py-2.5 text-left shadow-none transition-[background-color,border-color,transform] duration-200 hover:translate-x-0.5 hover:border-assistant/35 hover:bg-assistant-soft/75",
+              assistantSelected && "border-assistant/45 bg-assistant-soft ring-1 ring-assistant/15",
+            )}
+          >
+            <span className="relative flex size-11 shrink-0 items-center justify-center rounded-xl bg-assistant text-white shadow-sm">
+              <Bot className="size-5" />
+              <Sparkles className="absolute -right-1 -top-1 size-3.5 rounded-full bg-card p-0.5 text-assistant" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-[15px] font-semibold">Asistente de Lazo</span>
+              <span className="mt-0.5 block truncate text-[12px] font-normal text-assistant/80">Disponible siempre · todo tu CRM</span>
+            </span>
+          </Button>
+        </div>
         <CommandList className="max-h-none flex-1 px-2 pb-2">
           <CommandEmpty>
             <div className="mx-auto flex max-w-[220px] flex-col items-center gap-2 py-8 text-muted-foreground">
@@ -49,7 +84,10 @@ export function ContactList({ clients, selectedId, onSelect, className }: {
                 <div className="min-w-0 flex-1">
                   <div className="flex items-baseline justify-between gap-2">
                     <p className="truncate text-[15px] font-semibold">{fullName(client)}</p>
-                    {client.lastMessage ? <span className="shrink-0 text-[11px] font-medium tabular-nums text-muted-foreground">{timeFormatter.format(new Date(client.lastMessage.timestamp))}</span> : null}
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      {client.lastMessage ? <span className="text-[11px] font-medium tabular-nums text-muted-foreground">{timeFormatter.format(new Date(client.lastMessage.timestamp))}</span> : null}
+                      {client.unansweredCount > 0 ? <span aria-label={`${client.unansweredCount} ${client.unansweredCount === 1 ? "mensaje sin responder" : "mensajes sin responder"}`} className="inline-flex size-5 items-center justify-center rounded-full bg-primary text-[10px] font-semibold leading-none text-primary-foreground tabular-nums">{client.unansweredCount > 99 ? "99+" : client.unansweredCount}</span> : null}
+                    </div>
                   </div>
                   <p className="mt-1 truncate text-[13px] leading-snug text-muted-foreground">
                     {client.lastMessage?.direction === "outgoing" ? <CheckCheck className={cn("mr-1 inline size-3.5 stroke-[2.5]", client.lastMessage.readAt ? "text-wa-read" : "text-muted-foreground/70")} /> : null}
