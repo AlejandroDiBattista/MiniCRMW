@@ -2,10 +2,18 @@ import "server-only"
 
 import OpenAI from "openai"
 
-const openai = new OpenAI()
+let openai: OpenAI | undefined
+
+function getOpenAI() {
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error("OPENAI_API_KEY no configurada")
+  }
+
+  return (openai ??= new OpenAI({ apiKey: process.env.OPENAI_API_KEY }))
+}
 
 export async function transcribeAudio(file: File) {
-  const transcription = await openai.audio.transcriptions.create({
+  const transcription = await getOpenAI().audio.transcriptions.create({
     file,
     model: "gpt-4o-transcribe",
     language: "es",
