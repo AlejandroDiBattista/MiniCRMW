@@ -14,7 +14,7 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys"
 import { clientAvatarPath, ensureAvatarDirectory } from "@/lib/avatar"
 import { baileysAuthDirectory } from "@/lib/storage"
-import { ensureWhatsappClient, getClient, getClients, markClientAvatarUpdated, markMessageRead, normalizePhone, saveMessage } from "@/lib/db"
+import { ensureWhatsappClient, getClient, getClients, getMessages, markClientAvatarUpdated, markMessageRead, normalizePhone, saveMessage } from "@/lib/db"
 import type { Message, WhatsappConnectionStatus } from "@/lib/types"
 
 type WhatsappEvent =
@@ -43,6 +43,7 @@ class WhatsappManager {
   private shouldReconnect = true
   private profileSyncTimes = new Map<string, number>()
   private profileSyncAttemptTimes = new Map<string, number>()
+  private historySyncTimes = new Map<string, number>()
   private status: WhatsappConnectionStatus = {
     state: "disconnected",
     qrDataUrl: null,
@@ -138,6 +139,17 @@ class WhatsappManager {
       }
     })
 
+    // La sincronización inicial de WhatsApp llega en este evento (y no como
+    // `messages.upsert`). Persistimos sus mensajes para que las conversaciones
+    // existentes aparezcan también después de vincular el dispositivo. La
+    // inserción es idempotente por `whatsapp_id`, por lo que los reintentos o
+    // los bloques superpuestos no duplican mensajes.
+    socket.ev.on("messaging-history.set", ({ messages }) => {
+      for (const rawMessage of messages) {
+        void this.storeIncomingMessage(rawMessage, false)
+      }
+    })
+
     socket.ev.on("messages.upsert", ({ messages, type }) => {
       for (const rawMessage of messages) {
         void this.storeIncomingMessage(rawMessage, type === "notify")
@@ -206,6 +218,39 @@ class WhatsappManager {
     }
     void this.syncProfilePicture(clientId, remoteJid)
     return message
+  }
+
+  /**
+   * Pide a WhatsApp mensajes anteriores al más antiguo que ya tenemos. La
+   * respuesta llega de forma asíncrona por `messaging-history.set` y se
+   * persiste con el mismo camino idempotente de la sincronización inicial.
+   */
+  async fetchMessageHistory(clientId: string) {
+    const socket = this.socket
+    if (this.status.state !== "connected" || !socket) return false
+
+    const now = Date.now()
+    if (now - (this.historySyncTimes.get(clientId) ?? 0) < 10 * 60 * 1000) return false
+
+    const oldest = getMessages(clientId).find((message) =>
+      message.channel === "publico" && message.whatsappId && !message.remoteJid.startsWith("assistant@"),
+    )
+    if (!oldest?.whatsappId) return false
+
+    const timestamp = Date.parse(oldest.timestamp)
+    if (!Number.isFinite(timestamp)) return false
+
+    await socket.fetchMessageHistory(
+      100,
+      {
+        remoteJid: oldest.remoteJid,
+        fromMe: oldest.direction === "outgoing",
+        id: oldest.whatsappId,
+      },
+      timestamp,
+    )
+    this.historySyncTimes.set(clientId, now)
+    return true
   }
 
   private async syncAllProfilePictures() {

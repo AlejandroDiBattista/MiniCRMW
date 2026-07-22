@@ -5,8 +5,17 @@ export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
 export async function GET(request: Request) {
-  const clientId = new URL(request.url).searchParams.get("clientId")
+  const searchParams = new URL(request.url).searchParams
+  const clientId = searchParams.get("clientId")
   if (!clientId) return Response.json({ error: "Falta seleccionar un cliente." }, { status: 400 })
+  if (searchParams.get("sync") === "1") {
+    try {
+      await whatsappManager.fetchMessageHistory(clientId)
+    } catch {
+      // La carga local sigue siendo válida aunque el teléfono no responda
+      // una solicitud puntual de historial.
+    }
+  }
   return Response.json(getMessages(clientId))
 }
 

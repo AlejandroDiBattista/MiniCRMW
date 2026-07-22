@@ -87,7 +87,7 @@ export function CrmDashboard({ initialClients }: { initialClients: Client[] }) {
   useEffect(() => {
     if (!effectiveSelectedId || assistantSelected) return
     const controller = new AbortController()
-    fetch(`/api/whatsapp/messages?clientId=${effectiveSelectedId}`, { signal: controller.signal })
+    fetch(`/api/whatsapp/messages?clientId=${effectiveSelectedId}&sync=1`, { signal: controller.signal })
       .then((response) => response.json())
       .then((data) => { if (Array.isArray(data)) setMessages(data) })
       .catch((error) => { if (error.name !== "AbortError") toast.error("No pudimos cargar la conversación", { description: "Revisá tu conexión e intentá de nuevo." }) })
