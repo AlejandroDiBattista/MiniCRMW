@@ -144,10 +144,18 @@ db.exec(`
     PRIMARY KEY (suggestion_id, client_id)
   );
 
+  CREATE TABLE IF NOT EXISTS whatsapp_jid_aliases (
+    jid TEXT PRIMARY KEY,
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
   CREATE INDEX IF NOT EXISTS idx_messages_client_time ON messages(client_id, timestamp ASC);
   CREATE INDEX IF NOT EXISTS idx_suggestions_client_status ON assistant_suggestions(client_id, status, created_at ASC);
   CREATE INDEX IF NOT EXISTS idx_workspace_messages_time ON workspace_assistant_messages(timestamp ASC);
   CREATE INDEX IF NOT EXISTS idx_workspace_suggestions_status ON workspace_assistant_suggestions(status, created_at ASC);
+  CREATE INDEX IF NOT EXISTS idx_whatsapp_jid_aliases_client ON whatsapp_jid_aliases(client_id);
 `)
 
 let historyColumns = db.pragma("table_info(contact_history)") as Array<{ name: string }>
@@ -536,6 +544,225 @@ export function getClientByPhone(phone: string): Client | null {
     .get(normalizePhone(phone)) as ClientRow | undefined
   return row ? mapClient(row) : null
 }
+
+export function getClientByWhatsappJid(jid: string): Client | null {
+  const row = db.prepare(`
+    SELECT c.*
+    FROM whatsapp_jid_aliases a
+    JOIN clients c ON c.id = a.client_id
+    WHERE a.jid = ? AND c.deleted_at IS NULL
+  `).get(jid) as ClientRow | undefined
+  return row ? mapClient(row) : null
+}
+
+export const linkWhatsappJids = db.transaction((clientId: string, jids: string[]) => {
+  const now = new Date().toISOString()
+  const statement = db.prepare(`
+    INSERT INTO whatsapp_jid_aliases (jid, client_id, created_at, updated_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(jid) DO UPDATE SET
+      client_id = excluded.client_id,
+      updated_at = excluded.updated_at
+  `)
+
+  for (const jid of new Set(jids.map((value) => value.trim()).filter(Boolean))) {
+    statement.run(jid, clientId, now, now)
+  }
+})
+
+function normalizedName(value: string) {
+  return value.trim().replace(/\s+/g, " ").toLocaleLowerCase("es")
+}
+
+function rowDisplayName(row: ClientRow) {
+  return `${row.first_name} ${row.last_name}`.trim().replace(/\s+/g, " ")
+}
+
+function isGeneratedWhatsappName(value: string, ownDisplayName?: string | null) {
+  const normalized = normalizedName(value)
+  return !normalized
+    || normalized === "contacto whatsapp"
+    || Boolean(ownDisplayName && normalized === normalizedName(ownDisplayName))
+}
+
+function splitDisplayName(value: string) {
+  const parts = value.trim().replace(/\s+/g, " ").split(" ").filter(Boolean)
+  return {
+    firstName: parts.shift() || "Contacto",
+    lastName: parts.join(" "),
+  }
+}
+
+export function updateGeneratedWhatsappClientName(
+  clientId: string,
+  displayName: string | undefined,
+  ownDisplayName?: string | null,
+) {
+  const candidate = displayName?.trim()
+  if (!candidate || isGeneratedWhatsappName(candidate, ownDisplayName)) return getClient(clientId)
+
+  const row = db.prepare("SELECT * FROM clients WHERE id = ? AND deleted_at IS NULL").get(clientId) as ClientRow | undefined
+  if (!row || !isGeneratedWhatsappName(rowDisplayName(row), ownDisplayName)) return row ? mapClient(row) : null
+
+  const name = splitDisplayName(candidate)
+  db.prepare("UPDATE clients SET first_name = ?, last_name = ?, updated_at = ? WHERE id = ?")
+    .run(name.firstName, name.lastName, new Date().toISOString(), clientId)
+  return getClient(clientId)
+}
+
+function replaceClientIdInPayload(
+  value: unknown,
+  sourceClientId: string,
+  targetClientId: string,
+  targetUpdatedAt: string,
+): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => replaceClientIdInPayload(item, sourceClientId, targetClientId, targetUpdatedAt))
+  }
+  if (!value || typeof value !== "object") return value
+
+  const next: Record<string, unknown> = {}
+  for (const [key, item] of Object.entries(value)) {
+    next[key] = key === "clientId" && item === sourceClientId
+      ? targetClientId
+      : replaceClientIdInPayload(item, sourceClientId, targetClientId, targetUpdatedAt)
+  }
+  if (next.clientId === targetClientId && "expectedUpdatedAt" in next) next.expectedUpdatedAt = targetUpdatedAt
+  return next
+}
+
+function rewriteSuggestionPayloads(sourceClientId: string, targetClientId: string, targetUpdatedAt: string) {
+  const tables = [
+    { name: "assistant_suggestions", where: "client_id = ? OR instr(action_payload, ?) > 0", scoped: true },
+    { name: "workspace_assistant_suggestions", where: "instr(action_payload, ?) > 0", scoped: false },
+  ] as const
+  for (const table of tables) {
+    const params = table.scoped ? [sourceClientId, sourceClientId] : [sourceClientId]
+    const rows = db.prepare(`SELECT id, action_payload FROM ${table.name} WHERE ${table.where}`)
+      .all(...params) as Array<{ id: string; action_payload: string }>
+    const statement = db.prepare(`UPDATE ${table.name} SET action_payload = ? WHERE id = ?`)
+    for (const row of rows) {
+      try {
+        const payload = replaceClientIdInPayload(JSON.parse(row.action_payload), sourceClientId, targetClientId, targetUpdatedAt)
+        if (table.scoped && payload && typeof payload === "object" && !Array.isArray(payload) && "expectedUpdatedAt" in payload) {
+          ;(payload as Record<string, unknown>).expectedUpdatedAt = targetUpdatedAt
+        }
+        statement.run(JSON.stringify(payload), row.id)
+      } catch {
+        // Un payload inválido no debe impedir recuperar mensajes y tareas.
+      }
+    }
+  }
+}
+
+export type WhatsappClientMergeResult = {
+  sourceClientId: string
+  targetClientId: string
+  client: Client
+}
+
+export const mergeWhatsappClients = db.transaction((
+  sourceClientId: string,
+  targetClientId: string,
+  options: { preferredName?: string; ownDisplayName?: string | null } = {},
+): WhatsappClientMergeResult | null => {
+  if (sourceClientId === targetClientId) return null
+
+  const source = db.prepare("SELECT * FROM clients WHERE id = ?").get(sourceClientId) as ClientRow | undefined
+  const target = db.prepare("SELECT * FROM clients WHERE id = ?").get(targetClientId) as ClientRow | undefined
+  if (!source || !target) return null
+
+  const targetName = rowDisplayName(target)
+  const sourceName = rowDisplayName(source)
+  const preferredName = options.preferredName?.trim()
+  let mergedName = targetName
+  if (isGeneratedWhatsappName(targetName, options.ownDisplayName)) {
+    mergedName = preferredName && !isGeneratedWhatsappName(preferredName, options.ownDisplayName)
+      ? preferredName
+      : !isGeneratedWhatsappName(sourceName, options.ownDisplayName)
+        ? sourceName
+        : "Contacto WhatsApp"
+  }
+  const splitName = splitDisplayName(mergedName)
+  const updatedAt = new Date().toISOString()
+  const createdAt = source.created_at < target.created_at ? source.created_at : target.created_at
+
+  db.prepare(`
+    UPDATE clients
+    SET first_name = ?, last_name = ?, dni = ?, email = ?, avatar_updated_at = ?,
+        deleted_at = NULL, created_at = ?, updated_at = ?
+    WHERE id = ?
+  `).run(
+    splitName.firstName,
+    splitName.lastName,
+    target.dni || source.dni,
+    target.email || source.email,
+    target.avatar_updated_at || source.avatar_updated_at,
+    createdAt,
+    updatedAt,
+    targetClientId,
+  )
+
+  rewriteSuggestionPayloads(sourceClientId, targetClientId, updatedAt)
+
+  db.prepare("UPDATE contact_history SET client_id = ? WHERE client_id = ?").run(targetClientId, sourceClientId)
+  db.prepare("UPDATE messages SET client_id = ? WHERE client_id = ?").run(targetClientId, sourceClientId)
+  db.prepare("UPDATE assistant_suggestions SET client_id = ? WHERE client_id = ?").run(targetClientId, sourceClientId)
+  db.prepare("UPDATE assistant_evaluations SET client_id = ? WHERE client_id = ?").run(targetClientId, sourceClientId)
+
+  const deliveries = db.prepare("SELECT * FROM workspace_assistant_deliveries WHERE client_id = ?")
+    .all(sourceClientId) as Array<{
+      suggestion_id: string
+      message: string
+      status: "pendiente" | "enviado"
+      whatsapp_message_id: string | null
+      error: string | null
+      sent_at: string | null
+    }>
+  const existingDelivery = db.prepare("SELECT * FROM workspace_assistant_deliveries WHERE suggestion_id = ? AND client_id = ?")
+  const insertDelivery = db.prepare(`
+    INSERT INTO workspace_assistant_deliveries
+      (suggestion_id, client_id, message, status, whatsapp_message_id, error, sent_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `)
+  const updateDelivery = db.prepare(`
+    UPDATE workspace_assistant_deliveries
+    SET message = ?, status = ?, whatsapp_message_id = ?, error = ?, sent_at = ?
+    WHERE suggestion_id = ? AND client_id = ?
+  `)
+  for (const delivery of deliveries) {
+    const existing = existingDelivery.get(delivery.suggestion_id, targetClientId) as typeof delivery | undefined
+    if (!existing) {
+      insertDelivery.run(
+        delivery.suggestion_id,
+        targetClientId,
+        delivery.message,
+        delivery.status,
+        delivery.whatsapp_message_id,
+        delivery.error,
+        delivery.sent_at,
+      )
+    } else if (delivery.status === "enviado" && existing.status !== "enviado") {
+      updateDelivery.run(
+        delivery.message,
+        delivery.status,
+        delivery.whatsapp_message_id,
+        delivery.error,
+        delivery.sent_at,
+        delivery.suggestion_id,
+        targetClientId,
+      )
+    }
+  }
+  db.prepare("DELETE FROM workspace_assistant_deliveries WHERE client_id = ?").run(sourceClientId)
+
+  db.prepare("UPDATE whatsapp_jid_aliases SET client_id = ?, updated_at = ? WHERE client_id = ?")
+    .run(targetClientId, updatedAt, sourceClientId)
+  db.prepare("DELETE FROM clients WHERE id = ?").run(sourceClientId)
+
+  const client = getClient(targetClientId)
+  return client ? { sourceClientId, targetClientId, client } : null
+})
 
 export function createClient(input: {
   firstName: string

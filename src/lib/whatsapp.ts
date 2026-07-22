@@ -9,18 +9,35 @@ import makeWASocket, {
   jidNormalizedUser,
   useMultiFileAuthState as createMultiFileAuthState,
   WAMessageStatus,
+  type Contact,
+  type LIDMapping,
   type WASocket,
   type WAMessage,
 } from "@whiskeysockets/baileys"
 import { clientAvatarPath, ensureAvatarDirectory } from "@/lib/avatar"
 import { baileysAuthDirectory } from "@/lib/storage"
-import { ensureWhatsappClient, getClient, getClients, getMessages, markClientAvatarUpdated, markMessageRead, normalizePhone, saveMessage } from "@/lib/db"
+import {
+  ensureWhatsappClient,
+  getClient,
+  getClientByPhone,
+  getClientByWhatsappJid,
+  getClients,
+  getMessages,
+  linkWhatsappJids,
+  markClientAvatarUpdated,
+  markMessageRead,
+  mergeWhatsappClients,
+  normalizePhone,
+  saveMessage,
+  updateGeneratedWhatsappClientName,
+} from "@/lib/db"
 import type { Message, WhatsappConnectionStatus } from "@/lib/types"
 
 type WhatsappEvent =
   | { type: "status"; status: WhatsappConnectionStatus }
   | { type: "message"; clientId: string; message: Message }
   | { type: "profile"; clientId: string; avatarUpdatedAt: string }
+  | { type: "clients"; mergedClientId: string; removedClientId: string }
 
 type Listener = (event: WhatsappEvent) => void
 
@@ -35,6 +52,35 @@ function messageText(message: WAMessage) {
   )
 }
 
+function normalizedJid(value: string | null | undefined) {
+  if (!value?.includes("@")) return null
+  return jidNormalizedUser(value)
+}
+
+function isPhoneJid(value: string | null): value is string {
+  return Boolean(value?.endsWith("@s.whatsapp.net") || value?.endsWith("@hosted"))
+}
+
+function isLidJid(value: string | null): value is string {
+  return Boolean(value?.endsWith("@lid") || value?.endsWith("@hosted.lid"))
+}
+
+function jidPhone(value: string) {
+  return value.split("@")[0].split(":")[0]
+}
+
+function contactDisplayName(contact: Contact | null | undefined) {
+  return contact?.name?.trim()
+    || contact?.verifiedName?.trim()
+    || contact?.notify?.trim()
+    || undefined
+}
+
+type PendingMessage = {
+  message: WAMessage
+  evaluate: boolean
+}
+
 class WhatsappManager {
   private socket: WASocket | null = null
   private connecting: Promise<void> | null = null
@@ -44,6 +90,11 @@ class WhatsappManager {
   private profileSyncTimes = new Map<string, number>()
   private profileSyncAttemptTimes = new Map<string, number>()
   private historySyncTimes = new Map<string, number>()
+  private contactNames = new Map<string, string>()
+  private lidToPhoneJids = new Map<string, string>()
+  private pendingMessages = new Map<string, PendingMessage>()
+  private whatsappAccountName: string | undefined
+  private messageImportQueue: Promise<void> = Promise.resolve()
   private status: WhatsappConnectionStatus = {
     state: "disconnected",
     qrDataUrl: null,
@@ -67,6 +118,18 @@ class WhatsappManager {
   private setStatus(next: Partial<WhatsappConnectionStatus>) {
     this.status = { ...this.status, ...next }
     this.emit({ type: "status", status: this.status })
+  }
+
+  private enqueueImport(operation: () => Promise<void>) {
+    this.messageImportQueue = this.messageImportQueue
+      .then(operation)
+      .catch((error) => console.error("No pudimos procesar la identidad de WhatsApp", error))
+  }
+
+  private enqueueMessages(messages: WAMessage[], evaluate: boolean) {
+    this.enqueueImport(async () => {
+      for (const message of messages) await this.storeIncomingMessage(message, evaluate)
+    })
   }
 
   async connect() {
@@ -116,7 +179,11 @@ class WhatsappManager {
           user: socket.user?.id ? jidNormalizedUser(socket.user.id).split("@")[0] : null,
           error: null,
         })
-        setTimeout(() => void this.syncAllProfilePictures(), 1500)
+        this.enqueueImport(async () => {
+          await this.reconcileWhatsappClients(socket)
+          await this.flushPendingMessages()
+          setTimeout(() => void this.syncAllProfilePictures(), 1500)
+        })
       }
 
       if (update.connection === "close") {
@@ -139,21 +206,24 @@ class WhatsappManager {
       }
     })
 
-    // La sincronización inicial de WhatsApp llega en este evento (y no como
-    // `messages.upsert`). Persistimos sus mensajes para que las conversaciones
-    // existentes aparezcan también después de vincular el dispositivo. La
-    // inserción es idempotente por `whatsapp_id`, por lo que los reintentos o
-    // los bloques superpuestos no duplican mensajes.
-    socket.ev.on("messaging-history.set", ({ messages }) => {
-      for (const rawMessage of messages) {
-        void this.storeIncomingMessage(rawMessage, false)
-      }
+    socket.ev.on("messaging-history.set", ({ contacts, lidPnMappings, messages }) => {
+      this.rememberOwnDisplayName(messages)
+      this.rememberHistoryMetadata(contacts, lidPnMappings ?? [])
+      this.enqueueImport(async () => {
+        await this.reconcileWhatsappClients(socket)
+        for (const message of messages) await this.storeIncomingMessage(message, false)
+        await this.flushPendingMessages()
+      })
+    })
+
+    socket.ev.on("lid-mapping.update", (mapping) => {
+      this.rememberLidMapping(mapping)
+      this.enqueueImport(() => this.flushPendingMessages())
     })
 
     socket.ev.on("messages.upsert", ({ messages, type }) => {
-      for (const rawMessage of messages) {
-        void this.storeIncomingMessage(rawMessage, type === "notify")
-      }
+      this.rememberOwnDisplayName(messages)
+      this.enqueueMessages(messages, type === "notify")
     })
 
     socket.ev.on("messages.update", (updates) => {
@@ -166,17 +236,180 @@ class WhatsappManager {
     })
   }
 
+  private rememberLidMapping(mapping: LIDMapping) {
+    const lid = normalizedJid(mapping.lid)
+    const phoneJid = normalizedJid(mapping.pn)
+    if (isLidJid(lid) && isPhoneJid(phoneJid)) this.lidToPhoneJids.set(lid, phoneJid)
+  }
+
+  private rememberHistoryMetadata(contacts: Contact[], mappings: LIDMapping[]) {
+    for (const mapping of mappings) this.rememberLidMapping(mapping)
+
+    for (const contact of contacts) {
+      const id = normalizedJid(contact.id)
+      const lid = normalizedJid(contact.lid)
+      const phoneJid = normalizedJid(contact.phoneNumber)
+      const name = contactDisplayName(contact)
+      const aliases = [id, lid, phoneJid].filter((value): value is string => Boolean(value))
+      if (name) for (const alias of aliases) this.contactNames.set(alias, name)
+      if (isLidJid(lid) && isPhoneJid(phoneJid)) this.lidToPhoneJids.set(lid, phoneJid)
+      if (isLidJid(id) && isPhoneJid(phoneJid)) this.lidToPhoneJids.set(id, phoneJid)
+    }
+  }
+
+  private rememberOwnDisplayName(messages: WAMessage[]) {
+    const ownName = messages.find((message) => message.key.fromMe && message.pushName?.trim())?.pushName?.trim()
+    if (ownName) this.whatsappAccountName = ownName
+  }
+
+  private ownDisplayName(socket: WASocket) {
+    return contactDisplayName(socket.user) || this.whatsappAccountName
+  }
+
+  private async resolvePhoneJid(socket: WASocket, remoteJid: string, alternateJid: string | null) {
+    if (isPhoneJid(alternateJid)) return alternateJid
+    if (isPhoneJid(remoteJid)) return remoteJid
+
+    const lid = isLidJid(remoteJid) ? remoteJid : isLidJid(alternateJid) ? alternateJid : null
+    if (!lid) return null
+    const hinted = this.lidToPhoneJids.get(lid)
+    if (hinted) return hinted
+
+    try {
+      const resolved = normalizedJid(await socket.signalRepository.lidMapping.getPNForLID(lid))
+      if (isPhoneJid(resolved)) {
+        this.lidToPhoneJids.set(lid, resolved)
+        return resolved
+      }
+    } catch {
+      // La asociación puede llegar unos instantes después mediante lid-mapping.update.
+    }
+    return null
+  }
+
+  private messageDisplayName(rawMessage: WAMessage, aliases: string[]) {
+    for (const alias of aliases) {
+      const name = this.contactNames.get(alias)
+      if (name) return name
+    }
+    return rawMessage.key.fromMe ? undefined : rawMessage.pushName?.trim() || undefined
+  }
+
+  private async mergeClientAvatar(sourceClientId: string, targetClientId: string) {
+    const sourcePath = clientAvatarPath(sourceClientId)
+    if (!fs.existsSync(sourcePath)) return
+
+    ensureAvatarDirectory()
+    const targetPath = clientAvatarPath(targetClientId)
+    try {
+      if (!fs.existsSync(targetPath)) await fs.promises.rename(sourcePath, targetPath)
+      else await fs.promises.unlink(sourcePath)
+    } catch {
+      // La ficha y sus mensajes ya están fusionados; el avatar puede resincronizarse.
+    }
+  }
+
+  private async mergeIntoCanonicalClient(
+    sourceClientId: string,
+    targetClientId: string,
+    preferredName: string | undefined,
+    ownDisplayName: string | undefined,
+  ) {
+    const merged = mergeWhatsappClients(sourceClientId, targetClientId, { preferredName, ownDisplayName })
+    if (!merged) return getClient(targetClientId)
+
+    await this.mergeClientAvatar(sourceClientId, targetClientId)
+    const profileSync = this.profileSyncTimes.get(sourceClientId)
+    if (profileSync && !this.profileSyncTimes.has(targetClientId)) this.profileSyncTimes.set(targetClientId, profileSync)
+    this.profileSyncTimes.delete(sourceClientId)
+    this.profileSyncAttemptTimes.delete(sourceClientId)
+    this.historySyncTimes.delete(sourceClientId)
+    this.emit({ type: "clients", mergedClientId: targetClientId, removedClientId: sourceClientId })
+    return merged.client
+  }
+
+  private async resolveMessageClient(rawMessage: WAMessage) {
+    const socket = this.socket
+    const remoteJid = normalizedJid(rawMessage.key.remoteJid)
+    const alternateJid = normalizedJid(rawMessage.key.remoteJidAlt)
+    if (!remoteJid) return null
+
+    const directPhoneJid = isPhoneJid(alternateJid) ? alternateJid : isPhoneJid(remoteJid) ? remoteJid : null
+    const phoneJid = directPhoneJid ?? (socket ? await this.resolvePhoneJid(socket, remoteJid, alternateJid) : null)
+    if (!phoneJid) return null
+
+    const lidJid = isLidJid(remoteJid) ? remoteJid : isLidJid(alternateJid) ? alternateJid : null
+    const aliases = [...new Set([remoteJid, alternateJid, lidJid, phoneJid].filter((value): value is string => Boolean(value)))]
+    const preferredName = this.messageDisplayName(rawMessage, aliases)
+    const ownDisplayName = socket ? this.ownDisplayName(socket) : this.whatsappAccountName
+    const phone = jidPhone(phoneJid)
+
+    let client = getClientByPhone(phone) ?? ensureWhatsappClient(phone, preferredName)
+    const possibleDuplicates = [...new Map(
+      [
+        ...aliases.map((alias) => getClientByWhatsappJid(alias)),
+        lidJid ? getClientByPhone(jidPhone(lidJid)) : null,
+      ]
+        .filter((candidate) => candidate && candidate.id !== client.id)
+        .map((candidate) => [candidate!.id, candidate!] as const),
+    ).values()]
+
+    for (const duplicate of possibleDuplicates) {
+      client = await this.mergeIntoCanonicalClient(duplicate.id, client.id, preferredName, ownDisplayName) ?? client
+    }
+
+    linkWhatsappJids(client.id, aliases)
+    client = updateGeneratedWhatsappClientName(client.id, preferredName, ownDisplayName) ?? client
+    return { client, phoneJid }
+  }
+
+  private pendingMessageKey(rawMessage: WAMessage) {
+    return rawMessage.key.id
+      || `${rawMessage.key.remoteJid ?? "unknown"}:${String(rawMessage.messageTimestamp ?? "")}:${messageText(rawMessage)}`
+  }
+
+  private deferMessage(rawMessage: WAMessage, evaluate: boolean) {
+    const key = this.pendingMessageKey(rawMessage)
+    if (!this.pendingMessages.has(key) && this.pendingMessages.size >= 2_000) {
+      const oldest = this.pendingMessages.keys().next().value
+      if (oldest) this.pendingMessages.delete(oldest)
+    }
+    this.pendingMessages.set(key, { message: rawMessage, evaluate })
+  }
+
+  private async flushPendingMessages() {
+    const pending = [...this.pendingMessages.values()]
+    this.pendingMessages.clear()
+    for (const item of pending) await this.storeIncomingMessage(item.message, item.evaluate)
+  }
+
+  private async reconcileWhatsappClients(socket: WASocket) {
+    const ownDisplayName = this.ownDisplayName(socket)
+    for (const source of getClients()) {
+      const lidJid = `${normalizePhone(source.phone)}@lid`
+      const phoneJid = await this.resolvePhoneJid(socket, lidJid, null)
+      if (!phoneJid || jidPhone(phoneJid) === normalizePhone(source.phone)) continue
+
+      const preferredName = this.contactNames.get(lidJid) || this.contactNames.get(phoneJid)
+      let target = getClientByPhone(jidPhone(phoneJid)) ?? ensureWhatsappClient(jidPhone(phoneJid), preferredName)
+      target = await this.mergeIntoCanonicalClient(source.id, target.id, preferredName, ownDisplayName) ?? target
+      linkWhatsappJids(target.id, [lidJid, phoneJid])
+      updateGeneratedWhatsappClientName(target.id, preferredName, ownDisplayName)
+    }
+  }
+
   private async storeIncomingMessage(rawMessage: WAMessage, evaluate: boolean) {
-    const remoteJid = rawMessage.key.remoteJid
+    const remoteJid = normalizedJid(rawMessage.key.remoteJid)
     const body = messageText(rawMessage).trim()
     if (!remoteJid || !body || remoteJid === "status@broadcast" || remoteJid.endsWith("@g.us")) return
+    if (!isPhoneJid(remoteJid) && !isLidJid(remoteJid)) return
 
-    const phoneJid = rawMessage.key.remoteJidAlt?.endsWith("@s.whatsapp.net")
-      ? rawMessage.key.remoteJidAlt
-      : remoteJid
-    if (!phoneJid.endsWith("@s.whatsapp.net") && !phoneJid.endsWith("@lid")) return
-    const phone = phoneJid.split("@")[0].split(":")[0]
-    const client = ensureWhatsappClient(phone, rawMessage.pushName ?? undefined)
+    const identity = await this.resolveMessageClient(rawMessage)
+    if (!identity) {
+      if (isLidJid(remoteJid)) this.deferMessage(rawMessage, evaluate)
+      return
+    }
+    const { client, phoneJid } = identity
     const seconds = Number(rawMessage.messageTimestamp ?? Math.floor(Date.now() / 1000))
     const message = saveMessage({
       clientId: client.id,

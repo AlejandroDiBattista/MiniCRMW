@@ -110,7 +110,7 @@ export function CrmDashboard({ initialClients }: { initialClients: Client[] }) {
     fetch("/api/whatsapp/status").then((response) => response.json()).then(setStatus).catch(() => undefined)
     const events = new EventSource("/api/whatsapp/events")
     events.onmessage = (event) => {
-      const payload = JSON.parse(event.data) as { type: string; status?: WhatsappConnectionStatus; clientId?: string; message?: Message; messages?: Message[] | WorkspaceAssistantMessage[] }
+      const payload = JSON.parse(event.data) as { type: string; status?: WhatsappConnectionStatus; clientId?: string; message?: Message; messages?: Message[] | WorkspaceAssistantMessage[]; mergedClientId?: string; removedClientId?: string }
       if (payload.type === "status" && payload.status) {
         setStatus(payload.status)
         if (payload.status.state === "qr") setQrOpen(true)
@@ -129,6 +129,13 @@ export function CrmDashboard({ initialClients }: { initialClients: Client[] }) {
       }
       if (payload.type === "workspace-assistant" && payload.messages) {
         setWorkspaceMessages(payload.messages as WorkspaceAssistantMessage[])
+        router.refresh()
+      }
+      if (payload.type === "clients") {
+        if (payload.removedClientId === selectedIdRef.current && payload.mergedClientId) {
+          setSelectedId(payload.mergedClientId)
+          selectedIdRef.current = payload.mergedClientId
+        }
         router.refresh()
       }
       if (payload.type === "profile") router.refresh()
