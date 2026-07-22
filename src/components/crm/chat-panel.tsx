@@ -326,7 +326,7 @@ export function ChatPanel({ client, messages, loading, status, onConnect, onBack
       ) : null}
 
       <ScrollArea className="min-h-0 flex-1">
-        <div className="flex min-h-full w-full flex-col justify-end gap-3 px-3 py-4 md:px-4">
+        <div className="flex min-h-full w-full flex-col justify-end gap-2.5 px-3 py-3 md:px-4">
           {loading ? <ConversationSkeleton /> : !hasVisibleConversation ? (
             <div className="my-auto flex flex-col items-center py-12 text-center">
               <div className="mb-4 flex size-12 items-center justify-center rounded-full border border-border bg-card text-muted-foreground"><MessageSquareText className="size-5" /></div>
@@ -339,8 +339,8 @@ export function ChatPanel({ client, messages, loading, status, onConnect, onBack
             const previousTimestamp = previous ? previous.kind === "message" ? previous.message.timestamp : previous.messages[0].timestamp : null
             const showDate = !previousTimestamp || new Date(previousTimestamp).toDateString() !== new Date(timestamp).toDateString()
             return (
-              <div key={item.kind === "message" ? item.message.id : item.id} className={cn(index === displayItems.length - 1 && "crm-reveal")}>
-                {showDate ? <div className="my-4 flex justify-center"><Badge variant="secondary" className="rounded-full border border-border bg-card px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.08em] shadow-xs">{dateFormatter.format(new Date(timestamp))}</Badge></div> : null}
+              <div key={item.kind === "message" ? item.message.id : item.id} className={cn("shrink-0", index === displayItems.length - 1 && "crm-reveal")}>
+                {showDate ? <div className="my-2 flex justify-center"><Badge variant="secondary" className="rounded-full border border-border bg-card px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.08em] shadow-xs">{dateFormatter.format(new Date(timestamp))}</Badge></div> : null}
                 {item.kind === "private-summary" ? (
                   <PrivateConversationSummary
                     messages={item.messages}
@@ -537,7 +537,7 @@ function PrivateConversationSummary({ messages, expanded, onToggle }: { messages
   const preview = assistantMessages.at(-1)?.body ?? messages[0]?.body ?? "Conversación privada con el asistente"
   const compactPreview = preview.replace(/\s+/g, " ").trim()
   return (
-    <div className="mt-2 w-full max-w-2xl self-center rounded-xl border border-dashed border-assistant/35 bg-assistant-soft/35 shadow-xs">
+    <div className="w-full max-w-2xl self-center rounded-xl border border-dashed border-assistant/35 bg-assistant-soft/35 shadow-xs">
       <button type="button" className="flex w-full items-center gap-3 px-3.5 py-2.5 text-left transition-colors hover:bg-assistant-soft/55" onClick={onToggle} aria-expanded={expanded}>
         <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-assistant/12 text-assistant"><Bot className="size-3.5" /></span>
         <span className="min-w-0 flex-1">

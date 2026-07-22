@@ -1052,6 +1052,9 @@ export function markMessageRead(whatsappId: string, readAt = new Date().toISOStr
 }
 
 function cancelPendingSuggestionsNow(clientId: string, changedAt = new Date().toISOString()) {
+  // This path is reserved for explicit user activity (new text, channel
+  // changes, or dismissal). Confirming a suggestion uses the scoped settle
+  // functions below and must not come through here.
   return db.prepare(`
     UPDATE assistant_suggestions
     SET status = 'cancelada', status_changed_at = ?, execution_token = NULL, execution_started_at = NULL
@@ -1201,6 +1204,8 @@ export function releaseAssistantSuggestion(id: string, token: string) {
   `).run(id, token).changes === 1
 }
 
+// Settling is intentionally scoped to the selected suggestion. Other pending
+// suggestions from the same assistant response remain available for review.
 export const executeAssistantSuggestion = db.transaction((id: string, token: string, resultSummary: string) => {
   const row = db.prepare("SELECT * FROM assistant_suggestions WHERE id = ?").get(id) as SuggestionRow | undefined
   if (!row || row.status !== "pendiente" || row.execution_token !== token) return null
@@ -1211,11 +1216,6 @@ export const executeAssistantSuggestion = db.transaction((id: string, token: str
     SET status = 'ejecutada', status_changed_at = ?, result_summary = ?, execution_token = NULL, execution_started_at = NULL
     WHERE id = ?
   `).run(changedAt, resultSummary.trim(), id)
-  db.prepare(`
-    UPDATE assistant_suggestions
-    SET status = 'descartada', status_changed_at = ?, execution_token = NULL, execution_started_at = NULL
-    WHERE client_id = ? AND id <> ? AND status = 'pendiente'
-  `).run(changedAt, row.client_id, id)
 
   return getAssistantSuggestion(id)
 })
@@ -1236,14 +1236,6 @@ export const resolveAssistantSuggestionInteractively = db.transaction((
     SET status = ?, status_changed_at = ?, result_summary = ?, execution_token = NULL, execution_started_at = NULL
     WHERE id = ? AND status = 'pendiente' AND execution_token IS NULL
   `).run(outcome, changedAt, outcome === "ejecutada" ? resultSummary.trim() : null, id)
-
-  if (outcome === "ejecutada") {
-    db.prepare(`
-      UPDATE assistant_suggestions
-      SET status = 'descartada', status_changed_at = ?, execution_token = NULL, execution_started_at = NULL
-      WHERE client_id = ? AND id <> ? AND status = 'pendiente'
-    `).run(changedAt, row.client_id, id)
-  }
 
   return { reason: null, suggestion: getAssistantSuggestion(id) }
 })
@@ -1386,6 +1378,8 @@ export function releaseWorkspaceAssistantSuggestion(id: string, token: string) {
   `).run(id, token).changes === 1
 }
 
+// Workspace suggestions are independent as well: confirming one must not
+// implicitly discard the rest of the assistant's proposed actions.
 export const executeWorkspaceAssistantSuggestion = db.transaction((id: string, token: string, resultSummary: string) => {
   const row = db.prepare("SELECT * FROM workspace_assistant_suggestions WHERE id = ?").get(id) as WorkspaceSuggestionRow | undefined
   if (!row || row.status !== "pendiente" || row.execution_token !== token) return null
@@ -1395,11 +1389,6 @@ export const executeWorkspaceAssistantSuggestion = db.transaction((id: string, t
     SET status = 'ejecutada', status_changed_at = ?, result_summary = ?, execution_token = NULL, execution_started_at = NULL
     WHERE id = ?
   `).run(changedAt, resultSummary.trim(), id)
-  db.prepare(`
-    UPDATE workspace_assistant_suggestions
-    SET status = 'descartada', status_changed_at = ?, execution_token = NULL, execution_started_at = NULL
-    WHERE id <> ? AND status = 'pendiente'
-  `).run(changedAt, id)
   return getWorkspaceAssistantSuggestion(id)
 })
 
@@ -1419,14 +1408,6 @@ export const resolveWorkspaceAssistantSuggestionInteractively = db.transaction((
     SET status = ?, status_changed_at = ?, result_summary = ?, execution_token = NULL, execution_started_at = NULL
     WHERE id = ? AND status = 'pendiente' AND execution_token IS NULL
   `).run(outcome, changedAt, outcome === "ejecutada" ? resultSummary.trim() : null, id)
-
-  if (outcome === "ejecutada") {
-    db.prepare(`
-      UPDATE workspace_assistant_suggestions
-      SET status = 'descartada', status_changed_at = ?, execution_token = NULL, execution_started_at = NULL
-      WHERE id <> ? AND status = 'pendiente'
-    `).run(changedAt, id)
-  }
 
   return { reason: null, suggestion: getWorkspaceAssistantSuggestion(id) }
 })
