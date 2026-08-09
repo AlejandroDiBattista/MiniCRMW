@@ -9,6 +9,8 @@ import makeWASocket, {
   jidNormalizedUser,
   useMultiFileAuthState as createMultiFileAuthState,
   WAMessageStatus,
+  Browsers,
+  fetchLatestBaileysVersion,
   type Contact,
   type LIDMapping,
   type WASocket,
@@ -155,9 +157,24 @@ class WhatsappManager {
     fs.mkdirSync(authDirectory, { recursive: true })
     const { state, saveCreds } = await createMultiFileAuthState(authDirectory)
 
+    // WhatsApp cambia con frecuencia la versión web aceptada. Usar la versión
+    // publicada más reciente evita el cierre 405 (Connection Failure) antes
+    // de que Baileys llegue a emitir el QR de vinculación.
+    let version: [number, number, number] | undefined
+    try {
+      const latest = await fetchLatestBaileysVersion()
+      if (latest.version) version = latest.version
+    } catch {
+      // Si no se puede consultar GitHub, Baileys usará su versión incluida.
+    }
+
     const socket = makeWASocket({
       auth: state,
-      browser: ["Lazo CRM", "Chrome", "1.0.0"],
+      ...(version ? { version } : {}),
+      // WhatsApp actualmente rechaza el sub-platform de escritorio de
+      // Baileys (428 antes de emitir el QR). Ubuntu/Chrome anuncia WEB_BROWSER
+      // y mantiene la sincronización completa sin depender de WhatsApp Desktop.
+      browser: Browsers.ubuntu("Chrome"),
       logger: pino({ level: process.env.NODE_ENV === "development" ? "warn" : "silent" }),
       markOnlineOnConnect: false,
       syncFullHistory: true,
@@ -166,6 +183,11 @@ class WhatsappManager {
 
     socket.ev.on("creds.update", saveCreds)
     socket.ev.on("connection.update", async (update) => {
+      // Una reconexión puede dejar eventos pendientes del socket anterior.
+      // Nunca permitimos que esos eventos reemplacen el estado del socket
+      // actualmente activo.
+      if (this.socket !== socket) return
+
       if (update.qr) {
         const qrDataUrl = await QRCode.toDataURL(update.qr, { margin: 1, width: 320 })
         this.setStatus({ state: "qr", qrDataUrl, error: null })
@@ -187,6 +209,7 @@ class WhatsappManager {
       }
 
       if (update.connection === "close") {
+        if (this.socket !== socket) return
         this.socket = null
         const error = update.lastDisconnect?.error as { output?: { statusCode?: number } } | undefined
         const statusCode = error?.output?.statusCode
@@ -207,6 +230,7 @@ class WhatsappManager {
     })
 
     socket.ev.on("messaging-history.set", ({ contacts, lidPnMappings, messages }) => {
+      if (this.socket !== socket) return
       this.rememberOwnDisplayName(messages)
       this.rememberHistoryMetadata(contacts, lidPnMappings ?? [])
       this.enqueueImport(async () => {
@@ -217,16 +241,19 @@ class WhatsappManager {
     })
 
     socket.ev.on("lid-mapping.update", (mapping) => {
+      if (this.socket !== socket) return
       this.rememberLidMapping(mapping)
       this.enqueueImport(() => this.flushPendingMessages())
     })
 
     socket.ev.on("messages.upsert", ({ messages, type }) => {
+      if (this.socket !== socket) return
       this.rememberOwnDisplayName(messages)
       this.enqueueMessages(messages, type === "notify")
     })
 
     socket.ev.on("messages.update", (updates) => {
+      if (this.socket !== socket) return
       for (const { key, update } of updates) {
         if (!key.fromMe || !key.id || update.status == null || update.status < WAMessageStatus.READ) continue
         const seconds = Number(update.messageTimestamp ?? Math.floor(Date.now() / 1000))

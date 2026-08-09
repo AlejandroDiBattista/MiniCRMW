@@ -44,4 +44,5 @@ next-env.d.ts
 /.data/
 /.baileys-auth/
 /.baileys-auth.backup
+/.baileys-auth.backup-*/
 /.playwright-mcp
