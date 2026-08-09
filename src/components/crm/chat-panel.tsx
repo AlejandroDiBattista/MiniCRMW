@@ -315,14 +315,16 @@ export function ChatPanel({ client, messages, loading, status, onConnect, onBack
       </div>
 
       {status.state !== "connected" ? (
-        <Alert className="m-3 shrink-0 rounded-lg border-warning-border/30 bg-warning/10 text-warning-foreground">
-          <CircleAlert />
-          <AlertTitle>WhatsApp no está conectado</AlertTitle>
-          <AlertDescription className="flex items-center justify-between gap-3">
-            <span>El asistente privado sigue disponible. Conectá el teléfono para usar el chat público.</span>
-            <Button size="xs" variant="outline" onClick={onConnect}>Conectar</Button>
-          </AlertDescription>
-        </Alert>
+        <div className="mx-3 shrink-0 min-w-0 md:mx-4">
+          <Alert className="min-w-0 rounded-lg border-warning-border/30 bg-warning/10 text-warning-foreground">
+            <CircleAlert />
+            <AlertTitle>WhatsApp no está conectado</AlertTitle>
+            <AlertDescription className="flex min-w-0 flex-wrap items-center justify-between gap-3">
+              <span className="min-w-0 flex-1 break-words">El asistente privado sigue disponible. Conectá el teléfono para usar el chat público.</span>
+              <Button size="xs" variant="outline" className="shrink-0" onClick={onConnect}>Conectar</Button>
+            </AlertDescription>
+          </Alert>
+        </div>
       ) : null}
 
       <ScrollArea className="min-h-0 flex-1">
