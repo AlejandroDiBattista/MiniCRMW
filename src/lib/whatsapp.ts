@@ -88,6 +88,7 @@ class WhatsappManager {
   private connecting: Promise<void> | null = null
   private listeners = new Set<Listener>()
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private connectionTimer: ReturnType<typeof setTimeout> | null = null
   private shouldReconnect = true
   private profileSyncTimes = new Map<string, number>()
   private profileSyncAttemptTimes = new Map<string, number>()
@@ -135,18 +136,39 @@ class WhatsappManager {
   }
 
   async connect() {
-    if (this.socket || this.connecting) return this.connecting
+    if (this.connecting) return this.connecting
+    if (this.socket && this.status.state === "connected") return
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+    this.reconnectTimer = null
+
+    // A socket can remain half-open when the platform drops the WebSocket
+    // before Baileys emits `connection.update`. Do not let that stale socket
+    // block the retry button forever.
+    if (this.socket) {
+      const staleSocket = this.socket
+      this.socket = null
+      void staleSocket.end(new Error("Reiniciando el vínculo de WhatsApp")).catch(() => undefined)
+    }
 
     this.shouldReconnect = true
     this.connecting = this.openSocket()
     try {
       await this.connecting
+    } catch (error) {
+      console.error("No pudimos iniciar el vínculo de WhatsApp", error)
+      this.setStatus({
+        state: "error",
+        qrDataUrl: null,
+        error: "No se pudo iniciar la conexión con WhatsApp. Reintentá en unos segundos.",
+      })
+      throw error
     } finally {
       this.connecting = null
     }
   }
 
   async connectIfAuthenticated() {
+    if (!this.shouldReconnect || this.status.state !== "disconnected") return
     const credentialsFile = path.join(baileysAuthDirectory, "creds.json")
     if (fs.existsSync(credentialsFile)) await this.connect()
   }
@@ -162,8 +184,14 @@ class WhatsappManager {
     // de que Baileys llegue a emitir el QR de vinculación.
     let version: [number, number, number] | undefined
     try {
-      const latest = await fetchLatestBaileysVersion()
-      if (latest.version) version = latest.version
+      // Railway puede resolver WhatsApp pero no siempre puede llegar a
+      // raw.githubusercontent.com. La consulta de versión es opcional y no
+      // debe dejar la pantalla de vinculación en "Preparando" para siempre.
+      const latest = await Promise.race([
+        fetchLatestBaileysVersion().catch(() => null),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 8_000)),
+      ])
+      if (latest?.version) version = latest.version
     } catch {
       // Si no se puede consultar GitHub, Baileys usará su versión incluida.
     }
@@ -180,6 +208,7 @@ class WhatsappManager {
       syncFullHistory: true,
     })
     this.socket = socket
+    this.scheduleConnectionTimeout(socket, 45_000)
 
     socket.ev.on("creds.update", saveCreds)
     socket.ev.on("connection.update", async (update) => {
@@ -190,10 +219,12 @@ class WhatsappManager {
 
       if (update.qr) {
         const qrDataUrl = await QRCode.toDataURL(update.qr, { margin: 1, width: 320 })
+        this.scheduleConnectionTimeout(socket, 90_000)
         this.setStatus({ state: "qr", qrDataUrl, error: null })
       }
 
       if (update.connection === "open") {
+        this.clearConnectionTimeout()
         this.profileSyncAttemptTimes.clear()
         this.setStatus({
           state: "connected",
@@ -210,17 +241,29 @@ class WhatsappManager {
 
       if (update.connection === "close") {
         if (this.socket !== socket) return
+        this.clearConnectionTimeout()
         this.socket = null
         const error = update.lastDisconnect?.error as { output?: { statusCode?: number } } | undefined
         const statusCode = error?.output?.statusCode
         const loggedOut = statusCode === DisconnectReason.loggedOut
-        const reconnect = this.shouldReconnect && !loggedOut
+        const wasConnected = this.status.state === "connected" || Boolean(this.status.user)
+        const reconnect = this.shouldReconnect && wasConnected && !loggedOut
         this.setStatus({
-          state: reconnect ? "error" : "disconnected",
+          state: this.shouldReconnect ? "error" : "disconnected",
           qrDataUrl: null,
           user: null,
-          error: reconnect ? "Se perdió la conexión. Reintentando…" : null,
+          error: !this.shouldReconnect
+            ? null
+            : loggedOut
+              ? "La sesión de WhatsApp expiró. Volvé a vincular el teléfono."
+              : statusCode
+                ? `WhatsApp cerró la conexión (${statusCode}).${reconnect ? " Reintentando…" : ""}`
+                : reconnect
+                  ? "Se perdió la conexión. Reintentando…"
+                  : "No se pudo completar el vínculo con WhatsApp.",
         })
+
+        if (loggedOut) void this.resetAuthState()
 
         if (reconnect) {
           if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
@@ -261,6 +304,36 @@ class WhatsappManager {
         if (message) this.emit({ type: "message", clientId: message.clientId, message })
       }
     })
+  }
+
+  private clearConnectionTimeout() {
+    if (this.connectionTimer) clearTimeout(this.connectionTimer)
+    this.connectionTimer = null
+  }
+
+  private scheduleConnectionTimeout(socket: WASocket, delayMs: number) {
+    this.clearConnectionTimeout()
+    this.connectionTimer = setTimeout(() => {
+      if (this.socket !== socket || this.status.state === "connected") return
+
+      this.socket = null
+      this.setStatus({
+        state: "error",
+        qrDataUrl: null,
+        user: null,
+        error: "WhatsApp no respondió a tiempo. Reintentá para generar un nuevo vínculo.",
+      })
+      void socket.end(new Error("Tiempo de espera agotado al vincular WhatsApp")).catch(() => undefined)
+    }, delayMs)
+  }
+
+  private async resetAuthState() {
+    try {
+      await fs.promises.rm(baileysAuthDirectory, { recursive: true, force: true })
+      await fs.promises.mkdir(baileysAuthDirectory, { recursive: true })
+    } catch (error) {
+      console.error("No pudimos limpiar la sesión de WhatsApp", error)
+    }
   }
 
   private rememberLidMapping(mapping: LIDMapping) {
@@ -599,6 +672,7 @@ class WhatsappManager {
     this.shouldReconnect = false
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.reconnectTimer = null
+    this.clearConnectionTimeout()
     this.socket?.end(undefined)
     this.socket = null
     this.setStatus({ state: "disconnected", qrDataUrl: null, user: null, error: null })

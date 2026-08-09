@@ -27,7 +27,7 @@ export function WhatsappDialog({ open, onOpenChange, status, onConnect }: {
             <div className="rounded-2xl border border-border bg-white p-3 shadow-sm"><Image src={status.qrDataUrl} alt="Código QR para vincular WhatsApp" width={260} height={260} unoptimized /></div>
           ) : connected ? (
             <div className="crm-reveal flex flex-col items-center text-center"><div className="flex size-20 items-center justify-center rounded-full bg-wa-soft text-wa-green"><CheckCheck className="crm-check-in size-9" /></div><p className="mt-4 font-medium">Todo en sincronía</p><p className="mt-1 max-w-xs text-sm text-muted-foreground">La conversación ya fluye igual desde Lazo o WhatsApp.</p></div>
-          ) : status.state === "error" ? (
+          ) : status.state === "error" || status.state === "disconnected" ? (
             <div className="flex flex-col items-center text-center"><CircleAlert className="size-10 text-destructive" /><p className="mt-4 font-medium">No pudimos conectar</p><p className="mt-1 text-sm text-muted-foreground">{status.error || "Revisá la conexión y volvé a intentar."}</p><Button className="mt-5" onClick={onConnect}>Reintentar</Button></div>
           ) : (
             <div className="crm-reveal flex flex-col items-center text-center"><LoaderCircle className="size-9 animate-spin text-primary" /><p className="mt-4 font-medium">Preparando el vínculo…</p><p className="mt-1 text-sm text-muted-foreground">Estamos creando una conexión segura con WhatsApp.</p></div>

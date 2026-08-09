@@ -107,7 +107,21 @@ export function CrmDashboard({ initialClients }: { initialClients: Client[] }) {
   }, [assistantSelected])
 
   useEffect(() => {
-    fetch("/api/whatsapp/status").then((response) => response.json()).then(setStatus).catch(() => undefined)
+    const controller = new AbortController()
+    const refreshStatus = () => {
+      fetch("/api/whatsapp/status", { signal: controller.signal })
+        .then((response) => response.json())
+        .then((nextStatus: WhatsappConnectionStatus) => {
+          setStatus(nextStatus)
+          if (nextStatus.state === "qr") setQrOpen(true)
+        })
+        .catch((error) => { if (error.name !== "AbortError") return })
+    }
+
+    refreshStatus()
+    // EventSource is the fast path, but a short polling fallback is important
+    // on Railway/proxies that buffer or reconnect long-lived SSE responses.
+    const statusPoll = window.setInterval(refreshStatus, 5_000)
     const events = new EventSource("/api/whatsapp/events")
     events.onmessage = (event) => {
       const payload = JSON.parse(event.data) as { type: string; status?: WhatsappConnectionStatus; clientId?: string; message?: Message; messages?: Message[] | WorkspaceAssistantMessage[]; mergedClientId?: string; removedClientId?: string }
@@ -140,7 +154,11 @@ export function CrmDashboard({ initialClients }: { initialClients: Client[] }) {
       }
       if (payload.type === "profile") router.refresh()
     }
-    return () => events.close()
+    return () => {
+      controller.abort()
+      window.clearInterval(statusPoll)
+      events.close()
+    }
   }, [router])
 
   function selectClient(id: string) {
