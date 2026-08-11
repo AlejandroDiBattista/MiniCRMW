@@ -107,13 +107,15 @@ export type Client = {
   dni: string
   email: string
   phone: string
+  isGroup: boolean
+  whatsappJid: string | null
   avatarUpdatedAt: string | null
   deletedAt: string | null
   createdAt: string
   updatedAt: string
   history: ContactHistory[]
   lastMessage: Message | null
-  unansweredCount: number
+  unreadCount: number
 }
 
 export type Message = {
@@ -125,6 +127,7 @@ export type Message = {
   body: string
   status: "received" | "sent" | "failed"
   readAt: string | null
+  seenAt: string | null
   timestamp: string
   author: ConversationAuthor
   channel: ConversationChannel

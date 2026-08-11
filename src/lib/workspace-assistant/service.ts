@@ -31,6 +31,8 @@ Acciones disponibles:
 Reglas:
 - Antes de sugerir un envío masivo, enumerá claramente cuántos destinatarios incluye y por qué fueron seleccionados.
 - Para contactar a quienes tengan tareas pendientes, usá únicamente clientes con tareas isCompleted=false y personalizá el mensaje según sus tareas.
+- Para consultar mensajes no leídos, usá exclusivamente unreadCount del contexto. No lo confundas con tareas pendientes ni con mensajes sin responder.
+- Los registros con isGroup=true son conversaciones de grupos de WhatsApp; no trates su whatsappJid como un teléfono personal.
 - Nunca incluyas destinatarios no respaldados por el contexto.
 - Para campos sin cambios devolvé null. clearDueAt sólo es true si se quita una fecha.
 - Las fechas deben ser ISO 8601 completas y se interpretan con currentDateTime y timeZone.
@@ -75,8 +77,11 @@ function workspaceContext() {
         dni: client.dni,
         email: client.email,
         phone: client.phone,
+        isGroup: client.isGroup,
+        whatsappJid: client.whatsappJid,
         createdAt: client.createdAt,
         updatedAt: client.updatedAt,
+        unreadCount: client.unreadCount,
         tasks: client.history,
         conversation: getMessages(client.id).map((message) => ({
           id: message.id,

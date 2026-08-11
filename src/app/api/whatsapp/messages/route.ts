@@ -1,4 +1,4 @@
-import { getMessages } from "@/lib/db"
+import { getMessages, markIncomingMessagesSeen } from "@/lib/db"
 import { whatsappManager } from "@/lib/whatsapp"
 
 export const runtime = "nodejs"
@@ -16,6 +16,7 @@ export async function GET(request: Request) {
       // una solicitud puntual de historial.
     }
   }
+  markIncomingMessagesSeen(clientId)
   return Response.json(getMessages(clientId))
 }
 

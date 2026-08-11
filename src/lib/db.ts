@@ -58,6 +58,8 @@ db.exec(`
     email TEXT NOT NULL DEFAULT '',
     phone TEXT NOT NULL,
     phone_normalized TEXT NOT NULL UNIQUE,
+    is_group INTEGER NOT NULL DEFAULT 0 CHECK(is_group IN (0, 1)),
+    whatsapp_jid TEXT,
     avatar_updated_at TEXT,
     deleted_at TEXT,
     created_at TEXT NOT NULL,
@@ -75,6 +77,7 @@ db.exec(`
     body TEXT NOT NULL,
     status TEXT NOT NULL CHECK(status IN ('received', 'sent', 'failed')),
     read_at TEXT,
+    seen_at TEXT,
     timestamp TEXT NOT NULL,
     author TEXT NOT NULL DEFAULT 'usuario' CHECK(author IN ('cliente', 'usuario', 'asistente')),
     channel TEXT NOT NULL DEFAULT 'publico' CHECK(channel IN ('publico', 'privado')),
@@ -179,10 +182,22 @@ if (!clientColumns.some((column) => column.name === "avatar_updated_at")) {
 if (!clientColumns.some((column) => column.name === "deleted_at")) {
   db.exec("ALTER TABLE clients ADD COLUMN deleted_at TEXT")
 }
+if (!clientColumns.some((column) => column.name === "is_group")) {
+  db.exec("ALTER TABLE clients ADD COLUMN is_group INTEGER NOT NULL DEFAULT 0")
+}
+if (!clientColumns.some((column) => column.name === "whatsapp_jid")) {
+  db.exec("ALTER TABLE clients ADD COLUMN whatsapp_jid TEXT")
+}
 
 const messageColumns = db.pragma("table_info(messages)") as Array<{ name: string }>
 if (!messageColumns.some((column) => column.name === "read_at")) {
   db.exec("ALTER TABLE messages ADD COLUMN read_at TEXT")
+}
+if (!messageColumns.some((column) => column.name === "seen_at")) {
+  db.exec("ALTER TABLE messages ADD COLUMN seen_at TEXT")
+  // Los mensajes existentes ya fueron vistos antes de incorporar el
+  // indicador de no leídos. Sólo los mensajes nuevos comenzarán pendientes.
+  db.exec("UPDATE messages SET seen_at = timestamp WHERE direction = 'incoming' AND seen_at IS NULL")
 }
 if (!messageColumns.some((column) => column.name === "author")) {
   db.exec("ALTER TABLE messages ADD COLUMN author TEXT NOT NULL DEFAULT 'usuario'")
@@ -233,6 +248,8 @@ type ClientRow = {
   dni: string
   email: string
   phone: string
+  is_group: 0 | 1
+  whatsapp_jid: string | null
   avatar_updated_at: string | null
   deleted_at: string | null
   created_at: string
@@ -263,6 +280,7 @@ type MessageRow = {
   body: string
   status: "received" | "sent" | "failed"
   read_at: string | null
+  seen_at: string | null
   timestamp: string
   author: ConversationAuthor
   channel: ConversationChannel
@@ -449,6 +467,7 @@ function mapMessage(row: MessageRow): Message {
     body: row.body,
     status: row.status,
     readAt: row.read_at,
+    seenAt: row.seen_at,
     timestamp: row.timestamp,
     author: row.author,
     channel: row.channel,
@@ -486,21 +505,14 @@ function mapClient(row: ClientRow): Client {
   const lastMessage = db
     .prepare(`${messageWithSuggestionSelect} WHERE m.client_id = ? AND m.channel = 'publico' ORDER BY m.timestamp DESC LIMIT 1`)
     .get(row.id) as MessageRow | undefined
-  const unanswered = db.prepare(`
+  const unread = db.prepare(`
     SELECT COUNT(*) AS count
     FROM messages incoming
     WHERE incoming.client_id = ?
       AND incoming.channel = 'publico'
       AND incoming.direction = 'incoming'
-      AND incoming.timestamp > COALESCE((
-        SELECT MAX(outgoing.timestamp)
-        FROM messages outgoing
-        WHERE outgoing.client_id = ?
-          AND outgoing.channel = 'publico'
-          AND outgoing.direction = 'outgoing'
-          AND outgoing.status <> 'failed'
-      ), '')
-  `).get(row.id, row.id) as { count: number }
+      AND incoming.seen_at IS NULL
+  `).get(row.id) as { count: number }
 
   return {
     id: row.id,
@@ -509,13 +521,15 @@ function mapClient(row: ClientRow): Client {
     dni: row.dni,
     email: row.email,
     phone: row.phone,
+    isGroup: Boolean(row.is_group),
+    whatsappJid: row.whatsapp_jid,
     avatarUpdatedAt: row.avatar_updated_at,
     deletedAt: row.deleted_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     history: history.map(mapHistory),
     lastMessage: lastMessage ? mapMessage(lastMessage) : null,
-    unansweredCount: unanswered.count,
+    unreadCount: unread.count,
   }
 }
 
@@ -978,6 +992,29 @@ export function ensureWhatsappClient(phone: string, displayName?: string): Clien
   })
 }
 
+export function ensureWhatsappGroup(jid: string, displayName?: string): Client {
+  const normalizedJid = jid.trim()
+  const byAlias = getClientByWhatsappJid(normalizedJid)
+  if (byAlias) return byAlias
+
+  const existing = db.prepare("SELECT * FROM clients WHERE is_group = 1 AND whatsapp_jid = ? AND deleted_at IS NULL").get(normalizedJid) as ClientRow | undefined
+  if (existing) {
+    linkWhatsappJids(existing.id, [normalizedJid])
+    return mapClient(existing)
+  }
+
+  const id = randomUUID()
+  const now = new Date().toISOString()
+  const name = displayName?.trim() || "Grupo de WhatsApp"
+  db.prepare(`
+    INSERT INTO clients
+      (id, first_name, last_name, dni, email, phone, phone_normalized, is_group, whatsapp_jid, created_at, updated_at)
+    VALUES (?, ?, '', '', '', ?, ?, 1, ?, ?, ?)
+  `).run(id, name, normalizedJid, `group:${normalizedJid}`, normalizedJid, now, now)
+  linkWhatsappJids(id, [normalizedJid])
+  return getClient(id)!
+}
+
 type SaveMessageInput = {
   clientId: string
   remoteJid: string
@@ -986,6 +1023,7 @@ type SaveMessageInput = {
   body: string
   status: "received" | "sent" | "failed"
   readAt?: string | null
+  seenAt?: string | null
   timestamp?: string
   author?: ConversationAuthor
   channel?: ConversationChannel
@@ -997,6 +1035,15 @@ export function getMessages(clientId: string): Message[] {
   return (db
     .prepare(`${messageWithSuggestionSelect} WHERE m.client_id = ? ORDER BY m.timestamp ASC, m.rowid ASC`)
     .all(clientId) as MessageRow[]).map(mapMessage)
+}
+
+export function markIncomingMessagesSeen(clientId: string) {
+  const seenAt = new Date().toISOString()
+  return db.prepare(`
+    UPDATE messages
+    SET seen_at = COALESCE(seen_at, ?)
+    WHERE client_id = ? AND channel = 'publico' AND direction = 'incoming' AND seen_at IS NULL
+  `).run(seenAt, clientId).changes
 }
 
 export function getMessage(id: string): Message | null {
@@ -1013,8 +1060,8 @@ function insertMessage(input: SaveMessageInput): Message {
   const assistantMode = input.assistantMode ?? null
   db.prepare(`
     INSERT OR IGNORE INTO messages
-      (id, client_id, remote_jid, whatsapp_id, direction, body, status, read_at, timestamp, author, channel, message_type, assistant_mode)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, client_id, remote_jid, whatsapp_id, direction, body, status, read_at, seen_at, timestamp, author, channel, message_type, assistant_mode)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     input.clientId,
@@ -1024,6 +1071,7 @@ function insertMessage(input: SaveMessageInput): Message {
     input.body,
     input.status,
     input.readAt ?? null,
+    input.seenAt ?? null,
     timestamp,
     author,
     channel,

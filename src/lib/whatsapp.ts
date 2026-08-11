@@ -25,6 +25,7 @@ import {
   getClientByWhatsappJid,
   getClients,
   getMessages,
+  ensureWhatsappGroup,
   linkWhatsappJids,
   markClientAvatarUpdated,
   markMessageRead,
@@ -67,6 +68,10 @@ function isLidJid(value: string | null): value is string {
   return Boolean(value?.endsWith("@lid") || value?.endsWith("@hosted.lid"))
 }
 
+function isGroupJid(value: string | null): value is string {
+  return Boolean(value?.endsWith("@g.us"))
+}
+
 function jidPhone(value: string) {
   return value.split("@")[0].split(":")[0]
 }
@@ -94,6 +99,7 @@ class WhatsappManager {
   private profileSyncAttemptTimes = new Map<string, number>()
   private historySyncTimes = new Map<string, number>()
   private contactNames = new Map<string, string>()
+  private groupNames = new Map<string, string>()
   private lidToPhoneJids = new Map<string, string>()
   private pendingMessages = new Map<string, PendingMessage>()
   private whatsappAccountName: string | undefined
@@ -211,6 +217,8 @@ class WhatsappManager {
     this.scheduleConnectionTimeout(socket, 45_000)
 
     socket.ev.on("creds.update", saveCreds)
+    socket.ev.on("groups.upsert", (groups) => this.rememberGroups(groups))
+    socket.ev.on("groups.update", (groups) => this.rememberGroups(groups))
     socket.ev.on("connection.update", async (update) => {
       // Una reconexión puede dejar eventos pendientes del socket anterior.
       // Nunca permitimos que esos eventos reemplacen el estado del socket
@@ -352,9 +360,35 @@ class WhatsappManager {
       const name = contactDisplayName(contact)
       const aliases = [id, lid, phoneJid].filter((value): value is string => Boolean(value))
       if (name) for (const alias of aliases) this.contactNames.set(alias, name)
+      if (isGroupJid(id) && name) this.groupNames.set(id, name)
       if (isLidJid(lid) && isPhoneJid(phoneJid)) this.lidToPhoneJids.set(lid, phoneJid)
       if (isLidJid(id) && isPhoneJid(phoneJid)) this.lidToPhoneJids.set(id, phoneJid)
     }
+  }
+
+  private rememberGroups(groups: Array<{ id?: string; subject?: string }>) {
+    for (const group of groups) {
+      const id = normalizedJid(group.id)
+      const subject = group.subject?.trim()
+      if (isGroupJid(id) && subject) this.groupNames.set(id, subject)
+    }
+  }
+
+  private async groupDisplayName(socket: WASocket, jid: string) {
+    const cached = this.groupNames.get(jid)
+    if (cached) return cached
+
+    try {
+      const metadata = await socket.groupMetadata(jid)
+      const subject = metadata.subject?.trim()
+      if (subject) {
+        this.groupNames.set(jid, subject)
+        return subject
+      }
+    } catch {
+      // Puede que la cuenta no tenga permiso para consultar los metadatos.
+    }
+    return "Grupo de WhatsApp"
   }
 
   private rememberOwnDisplayName(messages: WAMessage[]) {
@@ -434,6 +468,13 @@ class WhatsappManager {
     const alternateJid = normalizedJid(rawMessage.key.remoteJidAlt)
     if (!remoteJid) return null
 
+    if (isGroupJid(remoteJid)) {
+      const groupName = socket ? await this.groupDisplayName(socket, remoteJid) : this.groupNames.get(remoteJid)
+      const client = ensureWhatsappGroup(remoteJid, groupName)
+      linkWhatsappJids(client.id, [remoteJid])
+      return { client, phoneJid: remoteJid }
+    }
+
     const directPhoneJid = isPhoneJid(alternateJid) ? alternateJid : isPhoneJid(remoteJid) ? remoteJid : null
     const phoneJid = directPhoneJid ?? (socket ? await this.resolvePhoneJid(socket, remoteJid, alternateJid) : null)
     if (!phoneJid) return null
@@ -486,6 +527,7 @@ class WhatsappManager {
   private async reconcileWhatsappClients(socket: WASocket) {
     const ownDisplayName = this.ownDisplayName(socket)
     for (const source of getClients()) {
+      if (source.isGroup) continue
       const lidJid = `${normalizePhone(source.phone)}@lid`
       const phoneJid = await this.resolvePhoneJid(socket, lidJid, null)
       if (!phoneJid || jidPhone(phoneJid) === normalizePhone(source.phone)) continue
@@ -501,8 +543,8 @@ class WhatsappManager {
   private async storeIncomingMessage(rawMessage: WAMessage, evaluate: boolean) {
     const remoteJid = normalizedJid(rawMessage.key.remoteJid)
     const body = messageText(rawMessage).trim()
-    if (!remoteJid || !body || remoteJid === "status@broadcast" || remoteJid.endsWith("@g.us")) return
-    if (!isPhoneJid(remoteJid) && !isLidJid(remoteJid)) return
+    if (!remoteJid || !body || remoteJid === "status@broadcast") return
+    if (!isPhoneJid(remoteJid) && !isLidJid(remoteJid) && !isGroupJid(remoteJid)) return
 
     const identity = await this.resolveMessageClient(rawMessage)
     if (!identity) {
@@ -535,7 +577,9 @@ class WhatsappManager {
     if (!client) throw new Error("El cliente no existe")
     if (this.status.state !== "connected" || !this.socket) throw new Error("WhatsApp no está conectado")
 
-    const remoteJid = `${normalizePhone(client.phone)}@s.whatsapp.net`
+    const remoteJid = client.isGroup && client.whatsappJid
+      ? client.whatsappJid
+      : `${normalizePhone(client.phone)}@s.whatsapp.net`
     const result = await this.socket.sendMessage(remoteJid, { text: body.trim() })
     const message = saveMessage({
       clientId,
@@ -588,6 +632,7 @@ class WhatsappManager {
 
   private async syncAllProfilePictures() {
     for (const client of getClients()) {
+      if (client.isGroup) continue
       const phoneJid = `${normalizePhone(client.phone)}@s.whatsapp.net`
       const jids = [...new Set([client.lastMessage?.remoteJid, phoneJid].filter(Boolean))] as string[]
       for (const jid of jids) {
@@ -608,6 +653,7 @@ class WhatsappManager {
     this.profileSyncAttemptTimes.set(clientId, now)
     try {
       const client = getClient(clientId)
+      if (client?.isGroup) return false
       const phoneJid = client ? `${normalizePhone(client.phone)}@s.whatsapp.net` : null
       const candidates = [...new Set([jid, phoneJid].filter((value): value is string => Boolean(value)))]
 
@@ -662,7 +708,7 @@ class WhatsappManager {
 
   async refreshProfilePicture(clientId: string) {
     const client = getClient(clientId)
-    if (!client) return false
+    if (!client || client.isGroup) return false
     const phoneJid = `${normalizePhone(client.phone)}@s.whatsapp.net`
     const remoteJid = client.lastMessage?.remoteJid
     return this.syncProfilePicture(clientId, remoteJid && !remoteJid.startsWith("assistant@") ? remoteJid : phoneJid)

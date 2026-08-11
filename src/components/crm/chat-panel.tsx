@@ -19,6 +19,7 @@ import {
   Sparkles,
   Trash2,
   UserRoundPen,
+  UsersRound,
 } from "lucide-react"
 import { toast } from "sonner"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -300,12 +301,12 @@ export function ChatPanel({ client, messages, loading, status, onConnect, onBack
     >
       <div className="flex h-[72px] shrink-0 items-center gap-3 border-b border-border/80 bg-card px-4 md:px-5">
         <Button variant="ghost" size="icon-sm" className="md:hidden" onClick={onBack}><ArrowLeft /><span className="sr-only">Volver</span></Button>
-        <Avatar className="size-11 border border-border/80 shadow-xs"><AvatarImage src={avatarUrl(client)} alt={`Foto de ${fullName(client)}`} className="object-cover" /><AvatarFallback className="bg-secondary font-heading text-sm font-semibold">{initials(client)}</AvatarFallback></Avatar>
+        <Avatar className="size-11 border border-border/80 shadow-xs"><AvatarImage src={avatarUrl(client)} alt={`Foto de ${fullName(client)}`} className="object-cover" /><AvatarFallback className="bg-secondary font-heading text-sm font-semibold">{client.isGroup ? <UsersRound className="size-4" aria-hidden="true" /> : initials(client)}</AvatarFallback></Avatar>
         <div className="min-w-0 flex-1">
           <h2 className="truncate font-heading text-lg font-semibold leading-tight">{fullName(client)}</h2>
           <div className="mt-0.5 flex items-center gap-1.5 text-[13px] text-muted-foreground">
             <span className={cn("size-2 rounded-full", status.state === "connected" ? "crm-status-dot bg-wa-green text-wa-green" : "bg-muted-foreground/50")} />
-            {status.state === "connected" ? "Sincronizado con WhatsApp" : client.phone}
+            {status.state === "connected" ? "Sincronizado con WhatsApp" : client.isGroup ? "Grupo de WhatsApp" : client.phone}
           </div>
         </div>
         <Tooltip>

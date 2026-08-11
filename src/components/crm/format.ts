@@ -31,7 +31,11 @@ export function formatContactDate(value: string) {
 }
 
 export function initials(client: Client) {
-  return `${client.firstName[0] ?? ""}${client.lastName[0] ?? ""}`.toUpperCase()
+  // Array.from toma puntos de código completos y evita cortar emojis a la
+  // mitad, lo que produciría el carácter de reemplazo `�` durante SSR.
+  const firstNameInitial = Array.from(client.firstName.trim())[0] ?? ""
+  const lastNameInitial = Array.from(client.lastName.trim())[0] ?? ""
+  return `${firstNameInitial}${lastNameInitial}`.toUpperCase()
 }
 
 export function fullName(client: Client) {

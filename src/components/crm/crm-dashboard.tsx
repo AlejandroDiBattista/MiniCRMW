@@ -89,11 +89,16 @@ export function CrmDashboard({ initialClients }: { initialClients: Client[] }) {
     const controller = new AbortController()
     fetch(`/api/whatsapp/messages?clientId=${effectiveSelectedId}&sync=1`, { signal: controller.signal })
       .then((response) => response.json())
-      .then((data) => { if (Array.isArray(data)) setMessages(data) })
+      .then((data) => {
+        if (Array.isArray(data)) setMessages(data)
+        // La API marca los mensajes entrantes como vistos al abrir el chat.
+        // Actualizamos la lista para quitar inmediatamente el indicador.
+        router.refresh()
+      })
       .catch((error) => { if (error.name !== "AbortError") toast.error("No pudimos cargar la conversación", { description: "Revisá tu conexión e intentá de nuevo." }) })
       .finally(() => setLoadingMessages(false))
     return () => controller.abort()
-  }, [effectiveSelectedId, assistantSelected])
+  }, [effectiveSelectedId, assistantSelected, router])
 
   useEffect(() => {
     if (!assistantSelected) return
@@ -134,8 +139,15 @@ export function CrmDashboard({ initialClients }: { initialClients: Client[] }) {
           setMessages((current) => current.some((message) => message.id === payload.message!.id)
             ? current.map((message) => message.id === payload.message!.id ? payload.message! : message)
             : [...current, payload.message!])
+          // Si el chat está abierto, una llegada nueva se considera vista.
+          // La respuesta no reemplaza el estado local: sólo actualiza el
+          // contador persistido en SQLite.
+          void fetch(`/api/whatsapp/messages?clientId=${encodeURIComponent(payload.clientId)}`)
+            .catch(() => undefined)
+            .finally(() => router.refresh())
+        } else {
+          router.refresh()
         }
-        router.refresh()
       }
       if (payload.type === "assistant" && payload.clientId === selectedIdRef.current && payload.messages) {
         setMessages(payload.messages as Message[])

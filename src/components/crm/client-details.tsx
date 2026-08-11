@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useTransition, type ElementType } from "react"
 import { useRouter } from "next/navigation"
-import { CalendarDays, ChevronDown, Clock3, FileText, LoaderCircle, Mail, Pencil, Phone, Plus, Repeat2, Sparkles, Square, Trash2 } from "lucide-react"
+import { CalendarDays, ChevronDown, Clock3, FileText, LoaderCircle, Mail, Pencil, Phone, Plus, Repeat2, Sparkles, Square, Trash2, UsersRound } from "lucide-react"
 import { toast } from "sonner"
 import { completeHistoryAction, deleteHistoryAction } from "@/app/actions"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
@@ -65,7 +65,7 @@ export function ClientDetails({ client, onEdit, taskReview, onTaskReviewComplete
   return (
     <aside className={cn("h-full min-h-0 flex flex-col overflow-hidden border-l border-border/70 bg-card", className)}>
       <div className="flex h-[72px] shrink-0 items-center justify-between border-b border-border/80 px-5">
-        <div><h2 className="font-heading text-xl font-semibold leading-tight">Ficha del cliente</h2><p className="mt-0.5 text-[13px] text-muted-foreground">Datos e historial</p></div>
+        <div><h2 className="font-heading text-xl font-semibold leading-tight">{client.isGroup ? "Ficha del grupo" : "Ficha del cliente"}</h2><p className="mt-0.5 text-[13px] text-muted-foreground">Datos e historial</p></div>
         <Tooltip>
           <TooltipTrigger asChild><Button type="button" variant="ghost" size="icon-sm" onClick={onEdit}><Pencil /><span className="sr-only">Editar cliente</span></Button></TooltipTrigger>
           <TooltipContent>Editar cliente</TooltipContent>
@@ -74,11 +74,11 @@ export function ClientDetails({ client, onEdit, taskReview, onTaskReviewComplete
       <ScrollArea className="min-h-0 flex-1">
         <div className="px-5 py-4">
           <div className="flex items-center gap-3">
-            <Avatar className="size-[60px] border border-border shadow-xs"><AvatarImage src={avatarUrl(client)} alt={`Foto de ${fullName(client)}`} className="object-cover" /><AvatarFallback className="bg-secondary font-heading text-base font-semibold">{initials(client)}</AvatarFallback></Avatar>
-            <div className="min-w-0"><h3 className="truncate font-heading text-[22px] font-semibold leading-tight">{fullName(client)}</h3><Badge variant="secondary" className="mt-1.5 rounded-full px-2.5 text-xs">Cliente</Badge></div>
+            <Avatar className="size-[60px] border border-border shadow-xs"><AvatarImage src={avatarUrl(client)} alt={`Foto de ${fullName(client)}`} className="object-cover" /><AvatarFallback className="bg-secondary font-heading text-base font-semibold">{client.isGroup ? <UsersRound className="size-5" aria-hidden="true" /> : initials(client)}</AvatarFallback></Avatar>
+            <div className="min-w-0"><h3 className="truncate font-heading text-[22px] font-semibold leading-tight">{fullName(client)}</h3><Badge variant="secondary" className="mt-1.5 rounded-full px-2.5 text-xs">{client.isGroup ? "Grupo" : "Cliente"}</Badge></div>
           </div>
           <div className="mt-5 space-y-3 text-sm">
-            <DetailRow icon={Phone} label="Teléfono" value={client.phone} />
+            <DetailRow icon={Phone} label={client.isGroup ? "Identificador del grupo" : "Teléfono"} value={client.isGroup ? (client.whatsappJid ?? client.phone) : client.phone} />
             <DetailRow icon={Mail} label="Email" value={client.email || "Sin email"} muted={!client.email} />
             <DetailRow icon={FileText} label="DNI" value={client.dni || "Sin DNI"} muted={!client.dni} />
             <DetailRow icon={CalendarDays} label="Cliente desde" value={dateFormatter.format(new Date(client.createdAt))} />
